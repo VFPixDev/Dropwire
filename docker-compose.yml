@@ -37,9 +37,9 @@ services:
     env_file:
       - path: .env
         required: false
-    command: ["uvicorn", "src.web:app", "--host", "0.0.0.0", "--port", "8080"]
+    command: ["uvicorn", "src.web:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
     ports:
-      - "${WEB_PUBLIC_PORT:-8080}:8080"
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PUBLIC_PORT:-8080}:8080"
     volumes:
       - data:/app/data
       - downloads:/app/downloads

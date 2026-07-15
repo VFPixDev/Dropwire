@@ -41,6 +41,18 @@ docker compose ps
 
 The web service is exposed on `http://localhost:8080` by default. YouTube browser links stay disabled until `WEB_BASE_URL` is a public HTTPS address that reaches this service.
 
+### Nginx reverse proxy
+
+The included [Nginx config](deploy/nginx/dropwire.conf) is intended for Nginx running on the Docker host. It exposes only signed download links, keeps the application port bound to localhost, and preserves HTTP Range requests required for seeking in iPhone Safari and the native player.
+
+1. Replace every `dropwire.example.com` in `deploy/nginx/dropwire.conf` with your domain.
+2. Issue a Let's Encrypt certificate, for example with `sudo certbot certonly --standalone -d your-domain.example`, and verify the certificate paths in the config.
+3. Copy or link the config into `/etc/nginx/conf.d/dropwire.conf`.
+4. Set `WEB_BASE_URL=https://your-domain.example` in `.env`.
+5. Run `sudo nginx -t && sudo systemctl reload nginx`, then restart Dropwire.
+
+Keep `WEB_BIND_ADDRESS=127.0.0.1` when Nginx runs on the host. If Nginx runs in Docker instead, connect it to `dropwire-network`, remove the host port mapping, and change the upstream to `dropwire-web:8080`.
+
 For local development:
 
 ```bash

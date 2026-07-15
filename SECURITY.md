@@ -8,6 +8,8 @@
 - Publish `dropwire-web` only through HTTPS.
 - Add reverse-proxy connection and request-rate limits for public deployments.
 - Do not expose the SQLite database or the downloads volume directly.
+- Keep `dropwire-web` bound to `127.0.0.1` when a reverse proxy runs on the host. Expose only Nginx ports 80 and 443.
+- Do not enable access logging for `/download/`: signed URLs contain temporary bearer tokens.
 - Keep Docker and the pinned Python dependencies updated.
 - Leave containers non-root, read-only and without Linux capabilities.
 

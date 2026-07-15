@@ -17,6 +17,7 @@ downloads
 tmp
 pmtwitter_source
 pmyoutube_extracted
+deploy
 
 *.db
 *.sqlite3
