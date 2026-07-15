@@ -7,6 +7,7 @@ from telegram.ext import (
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     filters,
 )
@@ -15,6 +16,7 @@ from src.handlers.commands import admin_panel, downloads, help_command, settings
 from src.handlers.callbacks import handle_callback_query
 from src.handlers.chat_members import handle_my_chat_member
 from src.handlers.messages import handle_message
+from src.handlers.inline import handle_inline_query
 from src.media.cleanup import cleanup_temp_files
 from src.services.database import Database
 from src.services.download_queue import DownloadQueue
@@ -121,6 +123,9 @@ def main():
 
     # Обработчик callback запросов от inline кнопок
     application.add_handler(CallbackQueryHandler(handle_callback_query))
+
+    # Inline mode: @dropwire_bot <link>. Provider requests must not pause polling.
+    application.add_handler(InlineQueryHandler(handle_inline_query, block=False))
 
     # Отслеживаем, кто добавил бота в группу, чтобы показывать пользователю только его группы.
     application.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))

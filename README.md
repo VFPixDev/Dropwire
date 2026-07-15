@@ -13,6 +13,8 @@ Dropwire is one Telegram bot that turns social links into compact media cards.
 
 Every card can include source, media type and author hashtags. A comment before the first link is rendered as a sender quote. Multiple supported links in one message are handled in order.
 
+Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated card. Telegram does not expose the destination chat ID to inline bots, so inline cards use the sender's DM settings over global defaults; group-specific settings cannot apply.
+
 ## Telegram UX
 
 - `/start` - main menu.
@@ -38,6 +40,8 @@ cp .env.example .env
 docker compose up -d --build
 docker compose ps
 ```
+
+Enable inline mode once in `@BotFather`: run `/setinline`, select `@dropwire_bot`, and set a placeholder such as `Вставьте ссылку из Twitter, YouTube, Spotify или SoundCloud`.
 
 The web service is exposed on `http://localhost:8080` by default. YouTube browser links stay disabled until `WEB_BASE_URL` is a public HTTPS address that reaches this service.
 

@@ -27,8 +27,10 @@ async def _check_telegram() -> bool:
     payload = response.json() if response.is_success else {}
     result = payload.get("result") if isinstance(payload, dict) else None
     username = result.get("username", "") if isinstance(result, dict) else ""
+    inline_enabled = bool(result.get("supports_inline_queries")) if isinstance(result, dict) else False
     ok = response.is_success and payload.get("ok") is True
-    print(f"telegram: {'ok' if ok else 'failed'} {username}".rstrip())
+    inline_state = "inline=on" if inline_enabled else "inline=off"
+    print(f"telegram: {'ok' if ok else 'failed'} {username} ({inline_state})".rstrip())
     return ok
 
 

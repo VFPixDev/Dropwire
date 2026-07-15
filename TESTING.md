@@ -17,6 +17,7 @@ Live provider and conversion checks use public sample links and never print cred
 
 ```bash
 docker run --rm --env-file .env dropwire-dropwire-bot python -m scripts.smoke_providers
+docker run --rm --env-file .env dropwire-dropwire-bot python -m scripts.smoke_inline
 docker run --rm --env-file .env --tmpfs /tmp:size=512m,mode=1777 dropwire-dropwire-bot python -m scripts.smoke_download
 ```
 
@@ -36,6 +37,7 @@ The same static, test, audit and container-build checks run in GitHub Actions on
 10. Open the signed link on iPhone Safari, download it, seek in the video and open it in the native player.
 11. Open `/downloads` and verify a fresh link can be issued while the retained file exists.
 12. Inspect `docker compose logs --tail 200`; there should be no tracebacks, leaked secrets or restart loop.
+13. Enable inline mode in BotFather, type `@dropwire_bot <public link>` in another chat, select the result and verify the preview, caption, hashtags and original-link button.
 
 ## Expected Limitations
 
