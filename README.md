@@ -1,2 +1,105 @@
 # Dropwire
+
 Dropwire — anything worth sharing, delivered to Telegram.
+
+Dropwire is one Telegram bot that turns social links into compact media cards.
+
+## Providers
+
+- Twitter/X: text, media, stats, quotes, polls and optional translation.
+- YouTube: thumbnail, title, author, duration, date, stats and browser downloads.
+- Spotify: artwork and title without credentials; richer metadata with optional API credentials.
+- SoundCloud: artwork, title and author through the official oEmbed endpoint.
+
+Every card can include source, media type and author hashtags. A comment before the first link is rendered as a sender quote. Multiple supported links in one message are handled in order.
+
+## Telegram UX
+
+- `/start` - main menu.
+- `/settings` - settings for the current context.
+- `/downloads` - recent files that are still retained.
+- `/help` - supported links and usage.
+- `/status` - runtime status for the owner, settings for other users.
+- `/admin` - owner-only provider controls and runtime counters.
+
+Settings are deliberately separated by scope:
+
+- Global settings are available only to users listed in `BOT_ADMIN_IDS`.
+- Group settings are edited in DM by the user who added the bot or a current Telegram group administrator.
+- DM settings affect only that user's private chat.
+- Inside a group, users can configure their own translation; group translation requires group admin rights.
+- DM and group profiles can be reset to inherited global values.
+
+## Quick Start
+
+```bash
+cp .env.example .env
+# Set BOT_TOKEN, BOT_ADMIN_IDS and YOUTUBE_API_KEY.
+docker compose up -d --build
+docker compose ps
+```
+
+The web service is exposed on `http://localhost:8080` by default. YouTube browser links stay disabled until `WEB_BASE_URL` is a public HTTPS address that reaches this service.
+
+For local development:
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements-dev.txt
+.venv/Scripts/python -m pytest tests -q
+.venv/Scripts/python -m ruff check src tests
+```
+
+## Required Configuration
+
+```env
+BOT_TOKEN=123456789:replace_me
+BOT_ADMIN_IDS=123456789
+```
+
+`BOT_ADMIN_IDS` is not a whitelist. Leave `TELEGRAM_USER_IDS` empty to allow everyone to use the bot.
+
+YouTube cards require `YOUTUBE_API_KEY`. YouTube browser downloads also require:
+
+```env
+WEB_BASE_URL=https://dropwire.example.com
+DOWNLOAD_TOKEN_SECRET=a-random-secret-with-at-least-32-characters
+```
+
+Put the web service behind HTTPS. Files are retained separately from link lifetime, so opening `/downloads` can issue a fresh signed link while the file still exists.
+
+Optional richer Spotify metadata:
+
+```env
+SPOTIFY_CLIENT_ID=...
+SPOTIFY_CLIENT_SECRET=...
+```
+
+Basic Spotify cards work without these credentials.
+
+## iPhone Downloads
+
+Video downloads are explicitly transcoded and verified before a link is sent:
+
+- MP4 container.
+- H.264 video.
+- AAC stereo audio.
+- `yuv420p` pixel format.
+- `faststart` metadata placement.
+- HTTP Range support for browser and native player seeking.
+
+Audio-only downloads use M4A/AAC. Spotify and SoundCloud content is not downloaded.
+
+## Supported Links
+
+- `https://x.com/user/status/123`
+- `https://twitter.com/user/status/123`
+- `https://youtu.be/VIDEO_ID`
+- `https://youtube.com/watch?v=VIDEO_ID`
+- `https://youtube.com/shorts/VIDEO_ID`
+- `https://open.spotify.com/track/ID`
+- `https://spotify.link/...`
+- `https://soundcloud.com/artist/track`
+- `https://on.soundcloud.com/...`
+
+See [SECURITY.md](SECURITY.md) and [TESTING.md](TESTING.md) before exposing the service publicly.
