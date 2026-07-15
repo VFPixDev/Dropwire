@@ -34,10 +34,23 @@ Settings are deliberately separated by scope:
 
 ## Quick Start
 
+The release image is published as `ghcr.io/vfpixdev/dropwire`. For a private package, authenticate once with a GitHub token that has `read:packages`, then start the pinned release:
+
+```bash
+docker login ghcr.io
+cp .env.example .env
+# Set BOT_TOKEN, BOT_ADMIN_IDS and YOUTUBE_API_KEY.
+DROPWIRE_IMAGE=ghcr.io/vfpixdev/dropwire:1.0.0 docker compose up -d
+docker compose ps
+```
+
+To build from the checked-out source instead:
+
 ```bash
 cp .env.example .env
 # Set BOT_TOKEN, BOT_ADMIN_IDS and YOUTUBE_API_KEY.
-docker compose up -d --build
+docker build -t dropwire:local .
+DROPWIRE_IMAGE=dropwire:local docker compose up -d
 docker compose ps
 ```
 

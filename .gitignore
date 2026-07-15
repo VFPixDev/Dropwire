@@ -12,6 +12,7 @@ htmlcov/
 /data/
 /downloads/
 /tmp/
+/dist/
 
 /pmtwitter_source/
 /pmyoutube_extracted/

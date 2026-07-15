@@ -1,6 +1,6 @@
 services:
   dropwire-bot:
-    build: .
+    image: ${DROPWIRE_IMAGE:-ghcr.io/vfpixdev/dropwire:latest}
     container_name: dropwire-bot
     init: true
     restart: unless-stopped
@@ -28,7 +28,7 @@ services:
       - dropwire-network
 
   dropwire-web:
-    build: .
+    image: ${DROPWIRE_IMAGE:-ghcr.io/vfpixdev/dropwire:latest}
     container_name: dropwire-web
     init: true
     restart: unless-stopped

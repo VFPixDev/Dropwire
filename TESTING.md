@@ -10,15 +10,15 @@
 .venv/Scripts/python -m pip check
 .venv/Scripts/pip-audit -r requirements.txt
 docker compose config --quiet
-docker compose build
+docker build -t dropwire:local .
 ```
 
 Live provider and conversion checks use public sample links and never print credentials:
 
 ```bash
-docker run --rm --env-file .env dropwire-dropwire-bot python -m scripts.smoke_providers
-docker run --rm --env-file .env dropwire-dropwire-bot python -m scripts.smoke_inline
-docker run --rm --env-file .env --tmpfs /tmp:size=512m,mode=1777 dropwire-dropwire-bot python -m scripts.smoke_download
+docker run --rm --env-file .env -v "${PWD}/scripts:/app/scripts:ro" dropwire:local python -m scripts.smoke_providers
+docker run --rm --env-file .env -v "${PWD}/scripts:/app/scripts:ro" dropwire:local python -m scripts.smoke_inline
+docker run --rm --env-file .env -v "${PWD}/scripts:/app/scripts:ro" --tmpfs /tmp:size=512m,mode=1777 dropwire:local python -m scripts.smoke_download
 ```
 
 The same static, test, audit and container-build checks run in GitHub Actions on every push and pull request.
