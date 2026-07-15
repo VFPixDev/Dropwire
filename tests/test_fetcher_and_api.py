@@ -11,6 +11,7 @@ from src.twitter.fetcher import (
     _get_with_retry,
     _is_safe_media_url,
     _is_trusted_twitter_media_host,
+    _is_trusted_twitter_media_url,
 )
 from src.twitter.parser_api import parse_tweet_api
 
@@ -82,6 +83,22 @@ def test_media_url_safety_blocks_local_targets():
     assert _is_trusted_twitter_media_host("video.twimg.com") is True
     assert _is_trusted_twitter_media_host("pbs.twimg.com.evil.example") is False
     assert _is_trusted_twitter_media_host("pbs.fxtwitter.com.evil.example") is False
+
+
+def test_fxtwitter_media_redirect_is_strictly_constrained():
+    trusted = urlparse(
+        "https://api.fxtwitter.com/2/go?url=https%3A%2F%2Fvideo.twimg.com%2Fvideo.mp4%3Ftag%3D1"
+    )
+    local_target = urlparse("https://api.fxtwitter.com/2/go?url=http%3A%2F%2F127.0.0.1%2Fsecret")
+    lookalike_target = urlparse(
+        "https://api.fxtwitter.com/2/go?url=https%3A%2F%2Fvideo.twimg.com.evil.example%2Fvideo.mp4"
+    )
+    wrong_path = urlparse("https://api.fxtwitter.com/other?url=https%3A%2F%2Fvideo.twimg.com%2Fvideo.mp4")
+
+    assert _is_trusted_twitter_media_url(trusted) is True
+    assert _is_trusted_twitter_media_url(local_target) is False
+    assert _is_trusted_twitter_media_url(lookalike_target) is False
+    assert _is_trusted_twitter_media_url(wrong_path) is False
 
 
 def test_parse_tweet_api_minimal_payload():

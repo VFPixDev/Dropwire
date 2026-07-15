@@ -43,7 +43,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
           labels: |
             org.opencontainers.image.title=Dropwire
             org.opencontainers.image.description=Telegram media cards for Twitter, YouTube, Spotify and SoundCloud

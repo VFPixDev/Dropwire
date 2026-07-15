@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 import ipaddress
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 from tenacity import before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -19,6 +19,8 @@ TRUSTED_TWITTER_MEDIA_HOSTS = {
     "abs.twimg.com",
     "ton.twimg.com",
 }
+FXTWITTER_MEDIA_REDIRECT_HOST = "api.fxtwitter.com"
+FXTWITTER_MEDIA_REDIRECT_PATH = "/2/go"
 
 
 class MediaTooLargeError(ValueError):
@@ -225,7 +227,7 @@ async def _download_media_once(
         for _ in range(4):
             parsed_current_url = urlparse(current_url)
             if not _is_safe_media_url(parsed_current_url) or (
-                trusted_twitter_hosts_only and not _is_trusted_twitter_media_host(parsed_current_url.hostname)
+                trusted_twitter_hosts_only and not _is_trusted_twitter_media_url(parsed_current_url)
             ):
                 raise ValueError("Небезопасный media redirect")
             async with client.stream("GET", current_url, headers=headers) as response:
@@ -276,7 +278,7 @@ async def _download_media_once(
 async def download_media(url: str, max_bytes: int = DEFAULT_MEDIA_MAX_BYTES) -> Optional[bytes]:
     """Скачивает медиа файл с лимитом размера."""
     parsed_url = urlparse(url)
-    if not _is_safe_media_url(parsed_url) or not _is_trusted_twitter_media_host(parsed_url.hostname):
+    if not _is_safe_media_url(parsed_url) or not _is_trusted_twitter_media_url(parsed_url):
         logger.warning("Медиа URL с недоверенным хостом или схемой пропущен: %s", url)
         return None
 
@@ -324,3 +326,28 @@ def _is_safe_media_url(parsed_url) -> bool:
 
 def _is_trusted_twitter_media_host(hostname: str | None) -> bool:
     return bool(hostname and hostname.lower().rstrip(".") in TRUSTED_TWITTER_MEDIA_HOSTS)
+
+
+def _is_trusted_twitter_media_url(parsed_url) -> bool:
+    """Allow direct Twitter CDN URLs and FxTwitter's constrained media redirect."""
+    if parsed_url.scheme != "https" or parsed_url.username or parsed_url.password or parsed_url.fragment:
+        return False
+
+    hostname = (parsed_url.hostname or "").lower().rstrip(".")
+    if _is_trusted_twitter_media_host(hostname):
+        return True
+    if hostname != FXTWITTER_MEDIA_REDIRECT_HOST or parsed_url.path != FXTWITTER_MEDIA_REDIRECT_PATH:
+        return False
+
+    query = parse_qs(parsed_url.query, keep_blank_values=True)
+    if set(query) != {"url"} or len(query["url"]) != 1:
+        return False
+
+    target = urlparse(query["url"][0])
+    return bool(
+        target.scheme == "https"
+        and not target.username
+        and not target.password
+        and not target.fragment
+        and _is_trusted_twitter_media_host(target.hostname)
+    )

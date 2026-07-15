@@ -99,11 +99,11 @@ async def post_shutdown(application: Application) -> None:
         await database.close()
 
 
-def main():
-    """Запуск бота"""
-    application = (
+def build_application() -> Application:
+    return (
         Application.builder()
         .token(config.BOT_TOKEN)
+        .concurrent_updates(config.MAX_CONCURRENT_UPDATES)
         .connect_timeout(config.TELEGRAM_CONNECT_TIMEOUT)
         .read_timeout(config.TELEGRAM_READ_TIMEOUT)
         .write_timeout(config.TELEGRAM_WRITE_TIMEOUT)
@@ -112,6 +112,11 @@ def main():
         .post_shutdown(post_shutdown)
         .build()
     )
+
+
+def main():
+    """Запуск бота"""
+    application = build_application()
 
     # Команды
     application.add_handler(CommandHandler("start", start))

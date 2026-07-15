@@ -22,7 +22,7 @@ class DownloadQueue:
             else:
                 wait_event = asyncio.Event()
                 self._waiting.append(wait_event)
-                position = self._active + len(self._waiting)
+                position = len(self._waiting)
 
         async def runner() -> None:
             if wait_event is not None:

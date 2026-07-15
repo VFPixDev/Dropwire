@@ -119,6 +119,8 @@ class Config:
     LOG_LEVEL: str = "INFO"
     RATE_LIMIT_SECONDS: int = 5
     RATE_LIMIT_CHAT_SECONDS: int = 3
+    RATE_LIMIT_CHAT_BURST: int = 5
+    MAX_CONCURRENT_UPDATES: int = 8
     REPLY_TO_MESSAGE: bool = True
     CAPTION_ABOVE_MEDIA: bool = True
     DUMP_TWEET_HTML: bool = False
@@ -181,6 +183,8 @@ class Config:
             LOG_LEVEL=os.getenv("LOG_LEVEL", "INFO").upper(),
             RATE_LIMIT_SECONDS=_parse_int("RATE_LIMIT_SECONDS", 5, min_value=0),
             RATE_LIMIT_CHAT_SECONDS=_parse_int("RATE_LIMIT_CHAT_SECONDS", 3, min_value=0),
+            RATE_LIMIT_CHAT_BURST=_parse_int("RATE_LIMIT_CHAT_BURST", 5, min_value=1),
+            MAX_CONCURRENT_UPDATES=_parse_int("MAX_CONCURRENT_UPDATES", 8, min_value=1),
             REPLY_TO_MESSAGE=_parse_bool("REPLY_TO_MESSAGE", "1"),
             CAPTION_ABOVE_MEDIA=_parse_bool("CAPTION_ABOVE_MEDIA", "1"),
             DUMP_TWEET_HTML=_parse_bool("DUMP_TWEET_HTML"),
