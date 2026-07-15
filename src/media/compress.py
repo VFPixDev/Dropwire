@@ -1,6 +1,8 @@
 import logging
 import os
-import subprocess
+import shutil
+# ffmpeg is invoked with argument lists and without a shell.
+import subprocess  # nosec B404
 import tempfile
 
 from PIL import Image
@@ -41,7 +43,7 @@ def compress_image(input_path: str, max_size_mb: float | None = None) -> str:
             else:
                 rgb_image = img.convert("RGB")
 
-            fd, output_path = tempfile.mkstemp(suffix=".jpg", dir="/tmp", prefix="compressed_")
+            fd, output_path = tempfile.mkstemp(suffix=".jpg", dir=tempfile.gettempdir(), prefix="compressed_")
             os.close(fd)
 
             quality = 85
@@ -75,18 +77,23 @@ def compress_video(input_path: str, max_size_mb: float | None = None) -> str:
     if current_size <= max_size_mb:
         return input_path
 
-    try:
-        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
         logger.warning("ffmpeg не найден, сжатие видео недоступно")
         return input_path
 
     try:
-        fd, output_path = tempfile.mkstemp(suffix=".mp4", dir="/tmp", prefix="compressed_")
+        subprocess.run([ffmpeg, "-version"], capture_output=True, check=True)  # nosec B603
+    except subprocess.CalledProcessError:
+        logger.warning("ffmpeg недоступен, сжатие видео невозможно")
+        return input_path
+
+    try:
+        fd, output_path = tempfile.mkstemp(suffix=".mp4", dir=tempfile.gettempdir(), prefix="compressed_")
         os.close(fd)
 
         cmd = [
-            "ffmpeg",
+            ffmpeg,
             "-i",
             input_path,
             "-c:v",
@@ -105,7 +112,7 @@ def compress_video(input_path: str, max_size_mb: float | None = None) -> str:
             output_path,
         ]
 
-        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, timeout=120)  # nosec B603
 
         if result.returncode == 0 and os.path.exists(output_path):
             new_size = get_file_size_mb(output_path)

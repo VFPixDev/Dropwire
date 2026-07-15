@@ -10,7 +10,7 @@ class RateLimiter:
 
     def check_user_limit(self, user_id: int) -> bool:
         """Проверяет, может ли пользователь сделать запрос"""
-        now = time.time()
+        now = time.monotonic()
         last_request = self.user_timestamps.get(user_id, 0)
 
         if now - last_request < config.RATE_LIMIT_SECONDS:
@@ -21,7 +21,7 @@ class RateLimiter:
 
     def check_chat_limit(self, chat_id: int) -> bool:
         """Проверяет, может ли чат сделать запрос"""
-        now = time.time()
+        now = time.monotonic()
         last_request = self.chat_timestamps.get(chat_id, 0)
 
         if now - last_request < config.RATE_LIMIT_CHAT_SECONDS:
@@ -32,11 +32,19 @@ class RateLimiter:
 
     def is_allowed(self, user_id: int, chat_id: int) -> bool:
         """Проверяет оба лимита"""
-        return self.check_user_limit(user_id) and self.check_chat_limit(chat_id)
+        now = time.monotonic()
+        user_limited = now - self.user_timestamps.get(user_id, 0) < config.RATE_LIMIT_SECONDS
+        chat_limited = now - self.chat_timestamps.get(chat_id, 0) < config.RATE_LIMIT_CHAT_SECONDS
+        if user_limited or chat_limited:
+            return False
+
+        self.user_timestamps[user_id] = now
+        self.chat_timestamps[chat_id] = now
+        return True
 
     def cleanup_old_entries(self, max_age: int = 3600):
         """Очищает старые записи (старше max_age секунд)"""
-        now = time.time()
+        now = time.monotonic()
 
         # Очистка пользователей
         old_users = [uid for uid, ts in self.user_timestamps.items() if now - ts > max_age]

@@ -25,6 +25,10 @@ class MediaTooLargeError(ValueError):
     """Raised when a media response exceeds configured download limits."""
 
 
+class ResponseTooLargeError(ValueError):
+    """Raised when an FxTwitter API or HTML response exceeds its limit."""
+
+
 def _is_retry_status(status_code: int) -> bool:
     return status_code in RETRY_STATUS_CODES or 500 <= status_code < 600
 
@@ -46,15 +50,44 @@ def _is_retry_status(status_code: int) -> bool:
     ),
     before_sleep=before_sleep_log(logger, logging.WARNING),
 )
-async def _get_with_retry(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> httpx.Response:
-    response = await client.get(url, headers=headers)
-    if _is_retry_status(response.status_code):
-        raise httpx.HTTPStatusError(
-            f"Retryable HTTP {response.status_code}",
+async def _get_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    max_bytes: int,
+) -> httpx.Response:
+    async with client.stream("GET", url, headers=headers) as response:
+        if _is_retry_status(response.status_code):
+            raise httpx.HTTPStatusError(
+                f"Retryable HTTP {response.status_code}",
+                request=response.request,
+                response=response,
+            )
+
+        if response.status_code != 200:
+            return httpx.Response(response.status_code, headers=response.headers, request=response.request)
+
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_size = int(content_length)
+            except ValueError as exc:
+                raise ResponseTooLargeError("FxTwitter returned an invalid Content-Length") from exc
+            if declared_size > max_bytes:
+                raise ResponseTooLargeError("FxTwitter response exceeds the configured limit")
+
+        data = bytearray()
+        async for chunk in response.aiter_bytes():
+            data.extend(chunk)
+            if len(data) > max_bytes:
+                raise ResponseTooLargeError("FxTwitter response exceeds the configured limit")
+
+        return httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            content=bytes(data),
             request=response.request,
-            response=response,
         )
-    return response
 
 
 async def fetch_tweet_data(tweet_id: str, username: str, lang_code: Optional[str] = None) -> Optional[dict]:
@@ -70,14 +103,24 @@ async def fetch_tweet_data(tweet_id: str, username: str, lang_code: Optional[str
             headers = {
                 "User-Agent": "TelegramBot/1.0",
                 "Accept": "application/json",
+                "Accept-Encoding": "identity",
             }
 
             if lang_code:
                 headers["Accept-Language"] = lang_code
 
-            response = await _get_with_retry(client, api_url, headers)
+            response = await _get_with_retry(
+                client,
+                api_url,
+                headers,
+                max_bytes=config.PROVIDER_RESPONSE_MAX_KB * 1024,
+            )
 
             if response.status_code == 200:
+                content_type = response.headers.get("content-type", "").lower()
+                if "json" not in content_type:
+                    logger.info("FxTwitter API вернул не JSON, используется HTML fallback")
+                    return None
                 try:
                     data = response.json()
                     logger.debug(
@@ -86,7 +129,7 @@ async def fetch_tweet_data(tweet_id: str, username: str, lang_code: Optional[str
                     )
                     return data if isinstance(data, dict) else None
                 except Exception as exc:
-                    logger.error("Ошибка парсинга JSON: %s", exc)
+                    logger.warning("FxTwitter API вернул некорректный JSON: %s", exc)
                     return None
             if response.status_code == 404:
                 logger.warning("Твит не найден: %s", api_url)
@@ -123,7 +166,11 @@ async def fetch_tweet_html(tweet_id: str, username: str, lang_code: Optional[str
             response = await _get_with_retry(
                 client,
                 url,
-                {"User-Agent": "TelegramBot/1.0 (compatible; +https://t.me/your_bot)"},
+                {
+                    "User-Agent": "TelegramBot/1.0 (compatible; +https://t.me/dropwire_bot)",
+                    "Accept-Encoding": "identity",
+                },
+                max_bytes=config.PROVIDER_RESPONSE_MAX_KB * 1024,
             )
 
             if response.status_code == 200:

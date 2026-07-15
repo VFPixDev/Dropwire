@@ -1,6 +1,7 @@
 import json
 import re
 import logging
+import tempfile
 from datetime import datetime
 from typing import Optional
 from bs4 import BeautifulSoup
@@ -249,10 +250,16 @@ def parse_tweet_html(html: str, original_url: str) -> Optional[Tweet]:
     if config.DUMP_TWEET_HTML:
         tweet_id_match = re.search(r"/status/(\d+)", original_url)
         tweet_id = tweet_id_match.group(1) if tweet_id_match else "unknown"
-        dump_path = f"/tmp/tweet_{tweet_id}.html"
         try:
-            with open(dump_path, "w", encoding="utf-8") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=f"tweet_{tweet_id}_",
+                suffix=".html",
+                delete=False,
+            ) as f:
                 f.write(html)
+                dump_path = f.name
             logger.info(f"HTML dump saved: {dump_path} (len={len(html)})")
         except Exception as e:
             logger.warning(f"Не удалось сохранить HTML дамп: {e}")

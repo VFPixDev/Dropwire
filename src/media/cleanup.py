@@ -1,16 +1,17 @@
 import os
 import time
 import logging
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-def cleanup_temp_files(temp_dir: str = "/tmp", max_age_seconds: int = 3600):
+def cleanup_temp_files(temp_dir: str | None = None, max_age_seconds: int = 3600):
     """Удаляет старые временные файлы бота"""
 
     prefixes = ["tweet_media_", "compressed_"]
-    temp_path = Path(temp_dir)
+    temp_path = Path(temp_dir or tempfile.gettempdir())
 
     if not temp_path.exists():
         return

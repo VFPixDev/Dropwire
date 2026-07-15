@@ -4,7 +4,7 @@ from telegram import Update
 
 from src.config import config
 from src.services.database import Database
-from src.twitter.translate import SUPPORTED_LANGUAGES, translate_settings
+from src.twitter.translate import SUPPORTED_LANGUAGES
 
 GLOBAL_OWNER_ID = 0
 VALID_SCOPES = {"global", "group", "dm"}
@@ -97,8 +97,6 @@ async def get_translation_language(database: Database | None, update: Update) ->
         global_lang = await database.get_translation_language("global", GLOBAL_OWNER_ID)
         if global_lang in SUPPORTED_LANGUAGES:
             return global_lang
-    if user is not None:
-        return translate_settings.get_language(user.id)
     return None
 
 
@@ -143,6 +141,10 @@ async def remember_group(database: Database | None, update: Update) -> None:
 
 def is_admin(user_id: int) -> bool:
     return user_id in config.BOT_ADMIN_IDS
+
+
+def is_user_allowed(user_id: int) -> bool:
+    return config.TELEGRAM_USER_IDS is None or user_id in config.TELEGRAM_USER_IDS
 
 
 async def _merged_settings(database: Database | None, scope: str, owner_id: int) -> dict[str, str]:

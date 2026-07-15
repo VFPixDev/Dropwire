@@ -17,7 +17,13 @@ from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html
 from src.twitter.parser import parse_tweet_html
 from src.twitter.parser_api import parse_tweet_api
 from src.services.database import Database
-from src.services.settings import EffectiveSettings, get_effective_settings, get_translation_language, remember_group
+from src.services.settings import (
+    EffectiveSettings,
+    get_effective_settings,
+    get_translation_language,
+    is_user_allowed,
+    remember_group,
+)
 from src.services.providers import is_provider_enabled
 from src.utils.sender_quote import format_sender_quote
 from src.utils.text_format import format_tweet_card, shorten_text_for_caption
@@ -123,9 +129,7 @@ def should_reply_in_chat(update: Update, settings: EffectiveSettings) -> bool:
 
 def check_whitelist(user_id: int) -> bool:
     """Проверяет whitelist пользователей"""
-    if config.TELEGRAM_USER_IDS is None:
-        return True
-    return user_id in config.TELEGRAM_USER_IDS
+    return is_user_allowed(user_id)
 
 
 async def send_tweet_card(
@@ -313,11 +317,11 @@ async def send_tweet_card(
         # fallback message here would create the duplicate replies users saw.
         logger.warning("Неоднозначный сетевой результат при отправке медиа; повтор не выполняется: %s", e)
     except TelegramError as e:
-        logger.error(f"Ошибка Telegram при отправке: {e}")
+        logger.error("Ошибка Telegram при отправке медиа: %s", e)
         await send_text_message(
             update,
             context,
-            f"❌ Ошибка при отправке медиа: {e}\n\n{card_text}",
+            f"⚠️ Telegram не смог отправить медиафайл.\n\n{card_text}",
             thread_id=thread_id,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
@@ -404,11 +408,11 @@ async def process_tweet_url(
         await send_tweet_card(update, context, tweet, thread_id, user_comment, settings)
         return True
     except Exception as e:
-        logger.error(f"Ошибка при отправке твита: {e}")
+        logger.error("Ошибка при отправке твита: %s", e)
         await send_text_message(
             update,
             context,
-            f"❌ Ошибка при отправке: {str(e)[:100]}",
+            "❌ Не удалось отправить карточку твита.",
             thread_id=thread_id,
             settings=settings,
         )
@@ -434,17 +438,32 @@ async def send_media_card(
     caption_above_media = settings.caption_above_media if settings else config.CAPTION_ABOVE_MEDIA
 
     if card.thumbnail_url:
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=card.thumbnail_url,
-            caption=text,
-            parse_mode=ParseMode.HTML,
-            message_thread_id=thread_id,
-            reply_to_message_id=reply_to_message_id,
-            show_caption_above_media=caption_above_media,
-            reply_markup=keyboard,
-            **telegram_timeout_kwargs(),
-        )
+        try:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=card.thumbnail_url,
+                caption=text,
+                parse_mode=ParseMode.HTML,
+                message_thread_id=thread_id,
+                reply_to_message_id=reply_to_message_id,
+                show_caption_above_media=caption_above_media,
+                reply_markup=keyboard,
+                **telegram_timeout_kwargs(),
+            )
+        except (TimedOut, NetworkError):
+            raise
+        except TelegramError as exc:
+            logger.warning("Telegram отклонил превью %s, отправляется текстовая карточка: %s", card.source, exc)
+            await send_text_message(
+                update,
+                context,
+                text,
+                thread_id=thread_id,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+                settings=settings,
+            )
         return
 
     await send_text_message(
@@ -558,12 +577,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Пользователь {user_id} не в whitelist")
         return
 
-    # Rate limiting
-    chat_id = update.effective_chat.id
-    if not rate_limiter.is_allowed(user_id, chat_id):
-        logger.info(f"Rate limit для пользователя {user_id}")
-        return
-
     database = context.application.bot_data.get("database")
     database = database if isinstance(database, Database) else None
     await remember_group(database, update)
@@ -578,6 +591,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     links = find_supported_links(message_text)
 
     if not links:
+        return
+
+    # Only actionable messages consume the rate limit. Otherwise any regular
+    # group message could suppress a supported link sent immediately after it.
+    chat_id = update.effective_chat.id
+    if not rate_limiter.is_allowed(user_id, chat_id):
+        logger.info("Rate limit для пользователя %s", user_id)
         return
 
     if len(links) > config.MAX_LINKS_PER_MESSAGE:
@@ -611,7 +631,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_username = update.get_bot().username
         user_comment = user_comment.replace(f"@{bot_username}", "").strip()
         if user_comment:
-            logger.info(f"Найден комментарий пользователя: {user_comment[:50]}")
+            logger.info("Найден комментарий пользователя длиной %s символов", len(user_comment))
 
     # Обрабатываем все найденные ссылки
     processed_count = 0

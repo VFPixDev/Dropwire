@@ -116,7 +116,6 @@ class Config:
     MAX_MEDIA_MB: int = 20
     FX_BASE_URL: str = "https://fxtwitter.com"
     INCLUDE_QUOTED_MEDIA: bool = False
-    DEFAULT_TRANSLATE_LANG: str = "off"
     LOG_LEVEL: str = "INFO"
     RATE_LIMIT_SECONDS: int = 5
     RATE_LIMIT_CHAT_SECONDS: int = 3
@@ -128,7 +127,6 @@ class Config:
     RETRY_WAIT_MAX: float = 4.0
     RETRY_WAIT_MULTIPLIER: float = 0.5
     RETRY_STATUS_CODES: list[int] = field(default_factory=lambda: [408, 429])
-    TRANSLATE_SETTINGS_PATH: str = "data/translate_settings.json"
     ENABLE_HASHTAGS: bool = True
     YOUTUBE_API_KEY: str = ""
     SPOTIFY_CLIENT_ID: str = ""
@@ -180,7 +178,6 @@ class Config:
             MAX_MEDIA_MB=_parse_int("MAX_MEDIA_MB", 20, min_value=1),
             FX_BASE_URL=_parse_fx_base_url(),
             INCLUDE_QUOTED_MEDIA=_parse_bool("INCLUDE_QUOTED_MEDIA"),
-            DEFAULT_TRANSLATE_LANG=os.getenv("DEFAULT_TRANSLATE_LANG", "off").strip().lower(),
             LOG_LEVEL=os.getenv("LOG_LEVEL", "INFO").upper(),
             RATE_LIMIT_SECONDS=_parse_int("RATE_LIMIT_SECONDS", 5, min_value=0),
             RATE_LIMIT_CHAT_SECONDS=_parse_int("RATE_LIMIT_CHAT_SECONDS", 3, min_value=0),
@@ -192,10 +189,6 @@ class Config:
             RETRY_WAIT_MAX=_parse_float("RETRY_WAIT_MAX", 4.0, min_value=0),
             RETRY_WAIT_MULTIPLIER=_parse_float("RETRY_WAIT_MULTIPLIER", 0.5, min_value=0),
             RETRY_STATUS_CODES=_parse_retry_status_codes(),
-            TRANSLATE_SETTINGS_PATH=os.getenv(
-                "TRANSLATE_SETTINGS_PATH",
-                "data/translate_settings.json",
-            ),
             ENABLE_HASHTAGS=_parse_bool("ENABLE_HASHTAGS", "1"),
             YOUTUBE_API_KEY=os.getenv("YOUTUBE_API_KEY", "").strip(),
             SPOTIFY_CLIENT_ID=os.getenv("SPOTIFY_CLIENT_ID", "").strip(),

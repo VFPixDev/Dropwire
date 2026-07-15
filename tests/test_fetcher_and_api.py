@@ -6,7 +6,9 @@ from urllib.parse import urlparse
 
 from src.twitter.fetcher import (
     MediaTooLargeError,
+    ResponseTooLargeError,
     _download_media_once,
+    _get_with_retry,
     _is_safe_media_url,
     _is_trusted_twitter_media_host,
 )
@@ -59,6 +61,14 @@ def test_download_media_rejects_stream_that_exceeds_limit(monkeypatch):
 
     with pytest.raises(MediaTooLargeError):
         asyncio.run(_download_media_once("https://example.com/file.jpg", {}, max_bytes=10))
+
+
+def test_fxtwitter_response_is_bounded_before_parsing():
+    response = FakeStreamResponse(chunks=[b"12345", b"67890", b"x"])
+    client = FakeClient(response)
+
+    with pytest.raises(ResponseTooLargeError):
+        asyncio.run(_get_with_retry(client, "https://fxtwitter.com/api/status/1", {}, max_bytes=10))
 
 
 def test_media_url_safety_blocks_local_targets():

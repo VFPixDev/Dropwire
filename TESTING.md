@@ -5,12 +5,22 @@
 ```bash
 .venv/Scripts/python -m pip install -r requirements-dev.txt
 .venv/Scripts/python -m pytest tests -q
-.venv/Scripts/python -m ruff check src tests
+.venv/Scripts/python -m ruff check .
+.venv/Scripts/bandit -q -r src
 .venv/Scripts/python -m pip check
-.venv/Scripts/python -m pip_audit -r requirements.txt
+.venv/Scripts/pip-audit -r requirements.txt
 docker compose config --quiet
 docker compose build
 ```
+
+Live provider and conversion checks use public sample links and never print credentials:
+
+```bash
+docker run --rm --env-file .env dropwire-dropwire-bot python -m scripts.smoke_providers
+docker run --rm --env-file .env --tmpfs /tmp:size=512m,mode=1777 dropwire-dropwire-bot python -m scripts.smoke_download
+```
+
+The same static, test, audit and container-build checks run in GitHub Actions on every push and pull request.
 
 ## Telegram Acceptance
 

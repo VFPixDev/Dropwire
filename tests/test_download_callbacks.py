@@ -44,6 +44,7 @@ def test_group_management_allows_adder_or_telegram_admin(tmp_path):
             context = SimpleNamespace(
                 bot=FakeBot(
                     {
+                        (-100, 42): "member",
                         (-200, 42): "administrator",
                         (-300, 42): "member",
                     }
@@ -56,6 +57,23 @@ def test_group_management_allows_adder_or_telegram_admin(tmp_path):
 
             groups = await _manageable_groups_for_user(context, database, 42)
             assert {group["chat_id"] for group in groups} == {-100, -200}
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_group_management_rejects_linked_user_after_leaving(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            await database.upsert_group(-100, "Former group", "supergroup")
+            await database.link_user_group(42, -100)
+            context = SimpleNamespace(bot=FakeBot({(-100, 42): "left"}))
+
+            assert await _user_can_manage_group(context, database, 42, -100) is False
         finally:
             await database.close()
 

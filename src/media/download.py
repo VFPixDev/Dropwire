@@ -33,7 +33,7 @@ async def download_media_file(url: str, media_type: str = "photo") -> Optional[s
     ext = _media_extension(url, media_type)
 
     try:
-        fd, temp_path = tempfile.mkstemp(suffix=ext, dir="/tmp", prefix="tweet_media_")
+        fd, temp_path = tempfile.mkstemp(suffix=ext, dir=tempfile.gettempdir(), prefix="tweet_media_")
         os.close(fd)
 
         with open(temp_path, "wb") as f:

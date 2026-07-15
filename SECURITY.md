@@ -16,9 +16,11 @@
 ## Implemented Controls
 
 - Owner checks for global and provider settings.
+- Optional user whitelist enforced for messages, commands and callback actions.
 - Group-adder or live Telegram-admin checks for group settings.
 - User ownership checks for DM settings and download callbacks.
 - Atomic download request claiming and per-user active limits.
+- Interrupted active downloads marked failed on startup so users cannot remain locked out.
 - HMAC-signed expiring download links with traversal protection.
 - Bounded external responses and media downloads.
 - Trusted Twitter media CDN allowlist and validated redirects.
@@ -26,6 +28,7 @@
 - HTML escaping for user, channel and group supplied text.
 - No automatic retry after ambiguous Telegram upload timeouts.
 - Dependency vulnerability audit in the documented test flow.
+- Read-only non-root containers with all Linux capabilities dropped and loopback-only web binding by default.
 
 ## Secrets
 

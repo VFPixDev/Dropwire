@@ -58,6 +58,7 @@ from src.services.settings import (
     SENDER_QUOTE_MODES,
     get_scope_settings,
     is_admin,
+    is_user_allowed,
     set_sender_quote_mode,
     set_translation_language,
     toggle_bool_setting,
@@ -80,6 +81,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     user_id = user.id
     callback_data = query.data or ""
+
+    if not is_user_allowed(user_id):
+        await query.answer("Доступ к боту ограничен владельцем", show_alert=True)
+        return
 
     logger.info("Callback от юзера %s: %s", user_id, callback_data)
 
@@ -176,20 +181,22 @@ async def handle_youtube_download_requested(
     if downloader is None:
         await query.answer("Downloader пока недоступен", show_alert=True)
         return
-    if await database.find_active_download_request(user_id, video_id) is not None:
-        await query.answer("Это видео уже находится в ваших загрузках", show_alert=True)
-        return
-    if await database.count_active_download_requests(user_id) >= config.MAX_ACTIVE_DOWNLOADS_PER_USER:
-        await query.answer("У вас уже слишком много активных загрузок", show_alert=True)
-        return
-
-    request_id = await database.create_download_request(
+    request_id, reservation_error = await database.reserve_download_request(
         telegram_id=user_id,
         video_id=video_id,
         source_chat_id=query.message.chat.id,
         source_message_id=query.message.message_id,
-        status="pending",
+        max_active=config.MAX_ACTIVE_DOWNLOADS_PER_USER,
     )
+    if reservation_error == "duplicate":
+        await query.answer("Это видео уже находится в ваших загрузках", show_alert=True)
+        return
+    if reservation_error == "limit":
+        await query.answer("У вас уже слишком много активных загрузок", show_alert=True)
+        return
+    if request_id is None:
+        await query.answer("Не удалось создать запрос на загрузку", show_alert=True)
+        return
 
     try:
         options = await downloader.get_available_format_options(f"https://www.youtube.com/watch?v={video_id}")
@@ -456,7 +463,7 @@ async def show_settings_hub(query: CallbackQuery, user_id: int) -> None:
 
 
 async def show_global_settings(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
-    if not is_admin(user_id):
+    if not _is_private(query) or not is_admin(user_id):
         await query.answer("Глобальные настройки доступны только администратору", show_alert=True)
         return
     await show_scope_settings(query, context, "global", GLOBAL_OWNER_ID)
@@ -859,10 +866,9 @@ async def _user_can_manage_group(
     user_id: int,
     chat_id: int,
 ) -> bool:
-    if await database.user_can_manage_group(user_id, chat_id):
-        return True
+    linked_as_adder = await database.user_can_manage_group(user_id, chat_id)
     if context is None:
-        return False
+        return linked_as_adder
 
     try:
         member = await context.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
@@ -870,7 +876,10 @@ async def _user_can_manage_group(
         logger.debug("Не удалось проверить админство user_id=%s chat_id=%s", user_id, chat_id, exc_info=True)
         return False
 
-    return str(member.status) in {"administrator", "creator", "owner"}
+    status = str(member.status)
+    if status in {"left", "kicked", "banned"}:
+        return False
+    return linked_as_adder or status in {"administrator", "creator", "owner"}
 
 
 def _parse_scope_owner(callback_data: str, prefix: str) -> tuple[str, int] | None:

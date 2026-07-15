@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ class Database:
     def __init__(self, db_path: str) -> None:
         self.db_path = Path(db_path)
         self._conn: aiosqlite.Connection | None = None
+        self._download_request_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -37,16 +39,6 @@ class Database:
                 telegram_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_settings (
-                chat_id INTEGER PRIMARY KEY,
-                reply_in_groups INTEGER,
-                remove_message_in_groups INTEGER,
-                reply_to_message INTEGER,
-                caption_above_media INTEGER,
-                enable_hashtags INTEGER,
                 updated_at TEXT NOT NULL
             );
 
@@ -80,12 +72,6 @@ class Database:
                 language TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (scope, owner_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS app_secrets (
-                name TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS download_requests (
@@ -138,59 +124,6 @@ class Database:
     async def get_user(self, telegram_id: int) -> aiosqlite.Row | None:
         cursor = await self.conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
         return await cursor.fetchone()
-
-    async def get_chat_settings(self, chat_id: int) -> aiosqlite.Row | None:
-        cursor = await self.conn.execute("SELECT * FROM chat_settings WHERE chat_id = ?", (chat_id,))
-        return await cursor.fetchone()
-
-    async def update_chat_settings(self, chat_id: int, **fields: Any) -> None:
-        allowed = {
-            "reply_in_groups",
-            "remove_message_in_groups",
-            "reply_to_message",
-            "caption_above_media",
-            "enable_hashtags",
-        }
-        clean_fields = {key: value for key, value in fields.items() if key in allowed}
-        if not clean_fields:
-            return
-
-        existing = await self.get_chat_settings(chat_id)
-        now = _utc_now()
-        if existing is None:
-            columns = ["chat_id", *clean_fields.keys(), "updated_at"]
-            placeholders = ", ".join(["?"] * len(columns))
-            values = [chat_id, *clean_fields.values(), now]
-            await self.conn.execute(
-                f"INSERT INTO chat_settings ({', '.join(columns)}) VALUES ({placeholders})",
-                values,
-            )
-        else:
-            clean_fields["updated_at"] = now
-            keys = list(clean_fields.keys())
-            values = [clean_fields[key] for key in keys]
-            set_clause = ", ".join([f"{key} = ?" for key in keys])
-            await self.conn.execute(f"UPDATE chat_settings SET {set_clause} WHERE chat_id = ?", (*values, chat_id))
-        await self.conn.commit()
-
-    async def set_secret(self, name: str, value: str) -> None:
-        now = _utc_now()
-        await self.conn.execute(
-            """
-            INSERT INTO app_secrets (name, value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                value = excluded.value,
-                updated_at = excluded.updated_at
-            """,
-            (name, value, now),
-        )
-        await self.conn.commit()
-
-    async def get_secret(self, name: str) -> str | None:
-        cursor = await self.conn.execute("SELECT value FROM app_secrets WHERE name = ?", (name,))
-        row = await cursor.fetchone()
-        return str(row["value"]) if row else None
 
     async def upsert_group(self, chat_id: int, title: str, chat_type: str) -> None:
         now = _utc_now()
@@ -338,6 +271,42 @@ class Database:
         await self.conn.commit()
         return int(cursor.lastrowid)
 
+    async def reserve_download_request(
+        self,
+        telegram_id: int,
+        video_id: str,
+        source_chat_id: int,
+        source_message_id: int,
+        max_active: int,
+    ) -> tuple[int | None, str | None]:
+        """Atomically reserve a pending download for one bot process."""
+        async with self._download_request_lock:
+            if await self.find_active_download_request(telegram_id, video_id) is not None:
+                return None, "duplicate"
+            if await self.count_active_download_requests(telegram_id) >= max(1, int(max_active)):
+                return None, "limit"
+            request_id = await self.create_download_request(
+                telegram_id=telegram_id,
+                video_id=video_id,
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+                status="pending",
+            )
+            return request_id, None
+
+    async def fail_interrupted_downloads(self) -> int:
+        """Release requests whose in-memory jobs disappeared during a restart."""
+        cursor = await self.conn.execute(
+            """
+            UPDATE download_requests
+            SET status = 'failed', updated_at = ?
+            WHERE status IN ('pending', 'queued', 'downloading')
+            """,
+            (_utc_now(),),
+        )
+        await self.conn.commit()
+        return max(cursor.rowcount, 0)
+
     async def count_active_download_requests(self, telegram_id: int) -> int:
         cursor = await self.conn.execute(
             """
@@ -381,19 +350,27 @@ class Database:
         return cursor.rowcount == 1
 
     async def update_download_request(self, request_id: int, **fields: Any) -> None:
-        allowed = {"selected_quality", "status"}
-        clean_fields = {key: value for key, value in fields.items() if key in allowed}
-        if not clean_fields:
+        selected_quality = fields.get("selected_quality")
+        status = fields.get("status")
+        if selected_quality is None and status is None:
             return
 
-        clean_fields["updated_at"] = _utc_now()
-        keys = list(clean_fields.keys())
-        values = [clean_fields[key] for key in keys]
-        set_clause = ", ".join([f"{key} = ?" for key in keys])
-        await self.conn.execute(
-            f"UPDATE download_requests SET {set_clause} WHERE id = ?",
-            (*values, request_id),
-        )
+        updated_at = _utc_now()
+        if selected_quality is not None and status is not None:
+            await self.conn.execute(
+                "UPDATE download_requests SET selected_quality = ?, status = ?, updated_at = ? WHERE id = ?",
+                (selected_quality, status, updated_at, request_id),
+            )
+        elif selected_quality is not None:
+            await self.conn.execute(
+                "UPDATE download_requests SET selected_quality = ?, updated_at = ? WHERE id = ?",
+                (selected_quality, updated_at, request_id),
+            )
+        else:
+            await self.conn.execute(
+                "UPDATE download_requests SET status = ?, updated_at = ? WHERE id = ?",
+                (status, updated_at, request_id),
+            )
         await self.conn.commit()
 
     async def create_download(self, request_id: int, file_path: str, final_size: int, format_note: str | None) -> None:
@@ -424,12 +401,12 @@ class Database:
 
     async def get_runtime_stats(self) -> dict[str, int]:
         result: dict[str, int] = {}
-        for name, table in {
-            "users": "users",
-            "groups": "groups",
-            "downloads": "downloads",
+        for name, query in {
+            "users": "SELECT COUNT(*) AS count FROM users",
+            "groups": "SELECT COUNT(*) AS count FROM groups",
+            "downloads": "SELECT COUNT(*) AS count FROM downloads",
         }.items():
-            cursor = await self.conn.execute(f"SELECT COUNT(*) AS count FROM {table}")
+            cursor = await self.conn.execute(query)
             row = await cursor.fetchone()
             result[name] = int(row["count"]) if row else 0
         cursor = await self.conn.execute(

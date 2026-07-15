@@ -44,7 +44,15 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if isinstance(context.error, (TimedOut, NetworkError)):
         logger.warning("Сетевая ошибка Telegram без автоматического повтора: %s", context.error)
         return
-    logger.error("Необработанная ошибка update=%r", update, exc_info=context.error)
+    error = context.error
+    update_id = getattr(update, "update_id", None)
+    exc_info = (type(error), error, error.__traceback__) if isinstance(error, BaseException) else None
+    logger.error(
+        "Необработанная ошибка update_id=%s error_type=%s",
+        update_id,
+        type(error).__name__,
+        exc_info=exc_info,
+    )
 
 
 async def post_init(application: Application) -> None:
@@ -52,6 +60,9 @@ async def post_init(application: Application) -> None:
     database = Database(config.DATABASE_PATH)
     await database.connect()
     await database.init_schema()
+    interrupted = await database.fail_interrupted_downloads()
+    if interrupted:
+        logger.warning("После перезапуска помечено неудачными загрузок: %s", interrupted)
     application.bot_data["database"] = database
     application.bot_data["download_queue"] = DownloadQueue(config.MAX_CONCURRENT_DOWNLOADS)
     application.bot_data["youtube_downloader"] = YtDlpDownloader(config.DOWNLOAD_DIR)

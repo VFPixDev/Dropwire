@@ -2,7 +2,8 @@ import asyncio
 import json
 import logging
 import shutil
-import subprocess
+# ffmpeg and ffprobe use resolved binaries and argument lists without a shell.
+import subprocess  # nosec B404
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from uuid import uuid4
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+from src.config import config
 from src.providers.youtube_urls import VIDEO_ID_RE
 
 logger = logging.getLogger(__name__)
@@ -118,7 +120,8 @@ class YtDlpDownloader:
             )
         except DownloadError as exc:
             await self.cleanup([temp_dir])
-            raise RuntimeError(f"Ошибка yt-dlp: {exc}") from exc
+            logger.warning("yt-dlp download failed for video_id=%s: %s", video_id, exc)
+            raise RuntimeError("Не удалось скачать это видео с YouTube") from exc
         except Exception:
             await self.cleanup([temp_dir])
             raise
@@ -171,6 +174,8 @@ class YtDlpDownloader:
             "progress_hooks": [hook],
             "retries": 3,
             "fragment_retries": 3,
+            "max_filesize": config.MAX_FILE_SIZE_MB * 1024 * 1024,
+            "socket_timeout": 30,
         }
         if quality == "audio":
             ydl_opts["postprocessors"] = [
@@ -206,7 +211,7 @@ class YtDlpDownloader:
             raise RuntimeError("FFmpeg не установлен")
         command = self._build_iphone_ffmpeg_command(ffmpeg, source_file, output_file)
         try:
-            subprocess.run(command, check=True, capture_output=True, timeout=1800)
+            subprocess.run(command, check=True, capture_output=True, timeout=1800)  # nosec B603
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stderr = getattr(exc, "stderr", b"") or b""
             logger.error("FFmpeg conversion failed: %s", stderr.decode("utf-8", errors="replace")[-1000:])
@@ -260,7 +265,7 @@ class YtDlpDownloader:
             str(file_path),
         ]
         try:
-            result = subprocess.run(command, check=True, capture_output=True, timeout=60)
+            result = subprocess.run(command, check=True, capture_output=True, timeout=60)  # nosec B603
             payload = json.loads(result.stdout.decode("utf-8"))
         except (
             subprocess.CalledProcessError,

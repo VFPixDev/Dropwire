@@ -173,6 +173,46 @@ def test_download_request_can_only_be_claimed_once(tmp_path):
     asyncio.run(run())
 
 
+def test_download_reservation_is_atomic_for_duplicate_clicks(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            reservations = await asyncio.gather(
+                database.reserve_download_request(42, "dQw4w9WgXcQ", 42, 1, 3),
+                database.reserve_download_request(42, "dQw4w9WgXcQ", 42, 1, 3),
+            )
+
+            assert sum(request_id is not None for request_id, _ in reservations) == 1
+            assert sorted(error for _, error in reservations if error) == ["duplicate"]
+            assert await database.count_active_download_requests(42) == 1
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_interrupted_downloads_are_failed_on_startup(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            pending_id = await database.create_download_request(42, "dQw4w9WgXcQ", 42, 1)
+            queued_id = await database.create_download_request(42, "9bZkp7q19f0", 42, 2, status="queued")
+            sent_id = await database.create_download_request(42, "M7lc1UVf-VE", 42, 3, status="sent")
+
+            assert await database.fail_interrupted_downloads() == 2
+            assert (await database.get_download_request(pending_id))["status"] == "failed"
+            assert (await database.get_download_request(queued_id))["status"] == "failed"
+            assert (await database.get_download_request(sent_id))["status"] == "sent"
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
 def test_admin_access_requires_explicit_id(monkeypatch):
     monkeypatch.setattr("src.services.settings.config.BOT_ADMIN_IDS", [])
     assert is_admin(42) is False

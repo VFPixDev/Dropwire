@@ -20,16 +20,27 @@ from src.handlers.menus import (
 )
 from src.services.database import Database
 from src.services.menu_data import build_download_menu_data, build_provider_states
-from src.services.settings import is_admin, remember_group
+from src.services.settings import is_admin, is_user_allowed, remember_group
 from src.providers.youtube_urls import VIDEO_ID_RE
 
 logger = logging.getLogger(__name__)
+
+
+async def _ensure_command_allowed(update: Update) -> bool:
+    user = update.effective_user
+    if user is None or is_user_allowed(user.id):
+        return True
+    if update.message is not None:
+        await update.message.reply_text("Доступ к боту ограничен владельцем.")
+    return False
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start - показывает главное меню."""
     if update.message is None or update.effective_user is None:
         logger.warning("Команда /start без message/effective_user")
+        return
+    if not await _ensure_command_allowed(update):
         return
 
     database = context.application.bot_data.get("database")
@@ -68,6 +79,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None or update.effective_user is None:
         logger.warning("Команда /status без message/effective_user")
         return
+    if not await _ensure_command_allowed(update):
+        return
 
     user_id = update.effective_user.id
     private = update.effective_chat is not None and update.effective_chat.type == "private"
@@ -94,6 +107,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None or update.effective_user is None:
         return
+    if not await _ensure_command_allowed(update):
+        return
     private = update.effective_chat is not None and update.effective_chat.type == "private"
     await update.message.reply_text(
         text=get_settings_hub_text(private, is_admin(update.effective_user.id)),
@@ -106,6 +121,8 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
+    if not await _ensure_command_allowed(update):
+        return
     await update.message.reply_text(
         text=get_help_text(),
         parse_mode=ParseMode.HTML,
@@ -116,6 +133,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def downloads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None or update.effective_user is None or update.effective_chat is None:
+        return
+    if not await _ensure_command_allowed(update):
         return
     if update.effective_chat.type != "private":
         await update.message.reply_text("Загрузки доступны только в ЛС с ботом.")
@@ -135,6 +154,8 @@ async def downloads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None or update.effective_user is None or update.effective_chat is None:
+        return
+    if not await _ensure_command_allowed(update):
         return
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
         await update.message.reply_text("Панель доступна только владельцу бота в ЛС.")
