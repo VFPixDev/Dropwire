@@ -4,6 +4,7 @@ from hashlib import sha256
 from html import escape
 import logging
 import re
+from urllib.parse import parse_qs, urlparse
 
 from telegram import (
     InlineKeyboardButton,
@@ -11,6 +12,7 @@ from telegram import (
     InlineQueryResult,
     InlineQueryResultArticle,
     InlineQueryResultPhoto,
+    InlineQueryResultVideo,
     InputTextMessageContent,
     Update,
     User,
@@ -31,10 +33,11 @@ from src.rendering.telegram_cards import format_card_text
 from src.services.database import Database
 from src.services.providers import is_provider_enabled
 from src.services.settings import EffectiveSettings, get_effective_settings, get_translation_language, is_user_allowed
-from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html
+from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html, get_trusted_twitter_mp4_url
 from src.twitter.normalize import extract_tweet_id, extract_username, normalize_url
 from src.twitter.parser import parse_tweet_html
 from src.twitter.parser_api import parse_tweet_api
+from src.twitter.models import Tweet
 from src.utils.sender_quote import format_sender_quote
 from src.utils.text_format import format_tweet_card
 
@@ -126,7 +129,7 @@ async def _build_inline_result(
         title = f"{tweet.display_name} (@{tweet.username})"
         description = _plain_description(tweet.text)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Открыть оригинал", url=tweet.url)]])
-        return _build_result(link, title, description, text, preview_url, keyboard, settings)
+        return _build_twitter_result(link, tweet, title, description, text, preview_url, keyboard, settings)
 
     card = await _fetch_media_card(link)
     if card is None:
@@ -213,6 +216,56 @@ def _build_result(
     return BuiltInlineResult(primary=photo, fallback=article)
 
 
+def _build_twitter_result(
+    link: LinkMatch,
+    tweet: Tweet,
+    title: str,
+    description: str,
+    text: str,
+    preview_url: str | None,
+    keyboard: InlineKeyboardMarkup | None,
+    settings: EffectiveSettings,
+) -> BuiltInlineResult:
+    fallback = _build_result(link, title, description, text, preview_url, keyboard, settings)
+    message_text = _fit_message_text(text, title, link.url)
+    if len(message_text) > 1024:
+        return fallback
+
+    video_url = None
+    thumbnail_url = None
+    for media_item in tweet.media:
+        if media_item.type != "video":
+            continue
+        candidate_url = get_trusted_twitter_mp4_url(media_item.url)
+        candidate_thumbnail = _trusted_twitter_jpeg_url(media_item.thumbnail_url) or _trusted_twitter_jpeg_url(
+            preview_url
+        )
+        if candidate_url and candidate_thumbnail:
+            video_url = candidate_url
+            thumbnail_url = candidate_thumbnail
+            break
+
+    if video_url is None or thumbnail_url is None:
+        return fallback
+
+    safe_title = _single_line(title, 120) or _source_title(link.source)
+    safe_description = _single_line(description, 180)
+    result_key = sha256(f"{link.source}:{link.url}:{message_text}".encode("utf-8")).hexdigest()[:32]
+    video = InlineQueryResultVideo(
+        id=f"v{result_key}",
+        video_url=video_url,
+        mime_type="video/mp4",
+        thumbnail_url=thumbnail_url,
+        title=safe_title,
+        description=safe_description,
+        caption=message_text,
+        parse_mode=ParseMode.HTML,
+        show_caption_above_media=settings.caption_above_media,
+        reply_markup=keyboard,
+    )
+    return BuiltInlineResult(primary=video, fallback=fallback.fallback)
+
+
 def _fit_message_text(text: str, title: str, original_url: str) -> str:
     if len(text) <= 4096:
         return text
@@ -243,6 +296,27 @@ def _tweet_preview_url(tweet) -> str | None:
         if media.thumbnail_url:
             return media.thumbnail_url
     return None
+
+
+def _trusted_twitter_jpeg_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or hostname not in {"pbs.twimg.com", "pbs.fxtwitter.com"}
+    ):
+        return None
+
+    extension = parsed.path.lower().rsplit(".", maxsplit=1)[-1] if "." in parsed.path else ""
+    query_format = parse_qs(parsed.query).get("format", [""])[0].lower()
+    if extension not in {"jpg", "jpeg"} and query_format not in {"jpg", "jpeg"}:
+        return None
+    return url
 
 
 def _card_description(card: MediaCard) -> str:

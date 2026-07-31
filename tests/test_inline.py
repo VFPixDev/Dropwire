@@ -1,9 +1,12 @@
-from telegram import InlineQueryResultArticle, InlineQueryResultPhoto, User
+from datetime import datetime
 
-from src.handlers.inline import _build_result, _prepend_sender_quote, _url_only_keyboard
+from telegram import InlineQueryResultArticle, InlineQueryResultPhoto, InlineQueryResultVideo, User
+
+from src.handlers.inline import _build_result, _build_twitter_result, _prepend_sender_quote, _url_only_keyboard
 from src.models.media_card import Button, MediaCard
 from src.providers.link_router import LinkMatch
 from src.services.settings import EffectiveSettings
+from src.twitter.models import MediaItem, Tweet
 
 
 def _settings(**overrides) -> EffectiveSettings:
@@ -66,3 +69,72 @@ def test_inline_sender_quote_uses_personal_mode_and_comment():
     text = _prepend_sender_quote("Card", user, "look", _settings())
 
     assert text == "<blockquote>@alice: look</blockquote>\n\nCard"
+
+
+def test_twitter_inline_result_sends_direct_video():
+    link = LinkMatch("twitter", "https://x.com/example/status/123", 0)
+    tweet = Tweet(
+        display_name="Example",
+        username="example",
+        url=link.url,
+        text="Video post",
+        date=datetime(2026, 7, 31),
+        media=[
+            MediaItem(
+                type="video",
+                url="https://video.twimg.com/ext_tw_video/123/playlist.m3u8",
+                thumbnail_url="https://evil.example/preview.jpg",
+            ),
+            MediaItem(
+                type="video",
+                url=(
+                    "https://api.fxtwitter.com/2/go?url="
+                    "https%3A%2F%2Fvideo.twimg.com%2Famplify_video%2F123%2Fvid%2F720x1280%2Fclip.mp4"
+                ),
+                thumbnail_url="https://pbs.twimg.com/amplify_video_thumb/123/img/preview.jpg",
+            )
+        ],
+    )
+
+    built = _build_twitter_result(
+        link,
+        tweet,
+        "Example (@example)",
+        "Video post",
+        "Video post",
+        tweet.media[1].thumbnail_url,
+        None,
+        _settings(),
+    )
+
+    assert isinstance(built.primary, InlineQueryResultVideo)
+    assert isinstance(built.fallback, InlineQueryResultArticle)
+    assert built.primary.video_url == "https://video.twimg.com/amplify_video/123/vid/720x1280/clip.mp4"
+    assert built.primary.mime_type == "video/mp4"
+
+
+def test_twitter_inline_result_rejects_untrusted_video_url():
+    link = LinkMatch("twitter", "https://x.com/example/status/123", 0)
+    thumbnail = "https://pbs.twimg.com/amplify_video_thumb/123/img/preview.jpg"
+    tweet = Tweet(
+        display_name="Example",
+        username="example",
+        url=link.url,
+        text="Video post",
+        date=datetime(2026, 7, 31),
+        media=[MediaItem(type="video", url="https://evil.example/video.mp4", thumbnail_url=thumbnail)],
+    )
+
+    built = _build_twitter_result(
+        link,
+        tweet,
+        "Example (@example)",
+        "Video post",
+        "Video post",
+        thumbnail,
+        None,
+        _settings(),
+    )
+
+    assert isinstance(built.primary, InlineQueryResultPhoto)
+    assert isinstance(built.fallback, InlineQueryResultArticle)

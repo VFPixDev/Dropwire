@@ -43,3 +43,22 @@ def test_parse_tweet_html_extracts_source_language_from_french_header():
     assert tweet.source_language == "l'anglais"
     assert tweet.translated_text is not None
     assert tweet.translated_text.startswith("Joyeuse Saint-Valentin")
+
+
+def test_parse_tweet_html_attaches_video_thumbnail_without_duplicate_photo():
+    html = """
+    <html><head>
+      <meta property="og:title" content="Example (@example)" />
+      <meta property="og:description" content="Video post" />
+      <meta property="article:published_time" content="2026-07-31T12:00:00Z" />
+      <meta property="og:video" content="https://video.twimg.com/ext_tw_video/123/video.mp4" />
+      <meta property="og:image" content="https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/preview.jpg" />
+    </head></html>
+    """
+
+    tweet = parse_tweet_html(html, "https://x.com/example/status/123")
+
+    assert tweet is not None
+    assert len(tweet.media) == 1
+    assert tweet.media[0].type == "video"
+    assert tweet.media[0].thumbnail_url == "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/preview.jpg"

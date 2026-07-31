@@ -330,24 +330,38 @@ def _is_trusted_twitter_media_host(hostname: str | None) -> bool:
 
 def _is_trusted_twitter_media_url(parsed_url) -> bool:
     """Allow direct Twitter CDN URLs and FxTwitter's constrained media redirect."""
+    return _trusted_twitter_media_target(parsed_url) is not None
+
+
+def get_trusted_twitter_mp4_url(url: str) -> str | None:
+    """Return a direct trusted Twitter MP4 URL, unwrapping FxTwitter redirects."""
+    target = _trusted_twitter_media_target(urlparse(url))
+    if target is None or not target.path.lower().endswith(".mp4"):
+        return None
+    return target.geturl()
+
+
+def _trusted_twitter_media_target(parsed_url):
     if parsed_url.scheme != "https" or parsed_url.username or parsed_url.password or parsed_url.fragment:
-        return False
+        return None
 
     hostname = (parsed_url.hostname or "").lower().rstrip(".")
     if _is_trusted_twitter_media_host(hostname):
-        return True
+        return parsed_url
     if hostname != FXTWITTER_MEDIA_REDIRECT_HOST or parsed_url.path != FXTWITTER_MEDIA_REDIRECT_PATH:
-        return False
+        return None
 
     query = parse_qs(parsed_url.query, keep_blank_values=True)
     if set(query) != {"url"} or len(query["url"]) != 1:
-        return False
+        return None
 
     target = urlparse(query["url"][0])
-    return bool(
+    if not (
         target.scheme == "https"
         and not target.username
         and not target.password
         and not target.fragment
         and _is_trusted_twitter_media_host(target.hostname)
-    )
+    ):
+        return None
+    return target

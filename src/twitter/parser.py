@@ -444,6 +444,12 @@ def parse_tweet_html(html: str, original_url: str) -> Optional[Tweet]:
                     video_thumb_urls.add(img_url)
                     logger.debug(f"Found and skipping video thumbnail {i}: {img_url}")
 
+        if video_thumb_urls:
+            thumbnail_url = sorted(video_thumb_urls)[0]
+            for media_item in media:
+                if media_item.type == "video" and not media_item.thumbnail_url:
+                    media_item.thumbnail_url = thumbnail_url
+
     logger.debug(f"Total media items: {len(media)}, video thumbnails skipped: {len(video_thumb_urls)}")
 
     # Статистика - ищем в мета тегах или структурированных данных

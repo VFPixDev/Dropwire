@@ -12,6 +12,7 @@ from src.twitter.fetcher import (
     _is_safe_media_url,
     _is_trusted_twitter_media_host,
     _is_trusted_twitter_media_url,
+    get_trusted_twitter_mp4_url,
 )
 from src.twitter.parser_api import parse_tweet_api
 
@@ -99,6 +100,20 @@ def test_fxtwitter_media_redirect_is_strictly_constrained():
     assert _is_trusted_twitter_media_url(local_target) is False
     assert _is_trusted_twitter_media_url(lookalike_target) is False
     assert _is_trusted_twitter_media_url(wrong_path) is False
+
+
+def test_trusted_twitter_mp4_url_unwraps_only_direct_mp4_targets():
+    wrapped = (
+        "https://api.fxtwitter.com/2/go?url="
+        "https%3A%2F%2Fvideo.twimg.com%2Famplify_video%2F123%2Fvid%2F720x1280%2Fclip.mp4%3Ftag%3D12"
+    )
+
+    assert (
+        get_trusted_twitter_mp4_url(wrapped)
+        == "https://video.twimg.com/amplify_video/123/vid/720x1280/clip.mp4?tag=12"
+    )
+    assert get_trusted_twitter_mp4_url("https://video.twimg.com/video.m3u8") is None
+    assert get_trusted_twitter_mp4_url("https://video.twimg.com.evil.example/video.mp4") is None
 
 
 def test_parse_tweet_api_minimal_payload():
