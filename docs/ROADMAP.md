@@ -21,7 +21,6 @@
 - Set a dedicated `DOWNLOAD_TOKEN_SECRET` instead of relying on the BOT_TOKEN fallback.
 - Optionally add Spotify API credentials for richer metadata.
 - Run the Telegram acceptance checklist in `TESTING.md` after deployment.
-- Bind a private channel in Global settings to enable Rich inline media collages.
 
 ## Future, Not Release Blocking
 

@@ -137,4 +137,4 @@ Audio-only downloads use M4A/AAC. Spotify and SoundCloud content is not download
 - `https://soundcloud.com/artist/track`
 - `https://on.soundcloud.com/...`
 
-See [SECURITY.md](SECURITY.md) and [TESTING.md](TESTING.md) before exposing the service publicly.
+See [Security](.github/SECURITY.md) and [Testing](docs/TESTING.md) before exposing the service publicly.
