@@ -1,8 +1,7 @@
 import asyncio
 import time
 
-from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
-from telegram.ext import ContextTypes
+from src.telegram_runtime import BadRequest, ContextTypes, NetworkError, RetryAfter, TelegramError
 
 
 class MessageProgress:

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from telegram import Update
+from src.telegram_runtime import Update
 
 from src.config import config
 from src.services.database import Database

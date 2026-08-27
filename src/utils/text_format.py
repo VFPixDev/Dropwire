@@ -160,10 +160,9 @@ def format_tweet_card(tweet: Tweet, include_translation: bool = False, user_comm
     lines.append(
         f'{escape(tweet.display_name)} (<a href="https://x.com/{escape(tweet.username)}">@{escape(tweet.username)}</a>) — {date_str}, {time_str}'
     )
-    lines.append("")
-
     # Флаг: был ли текст основного твита
     has_main_text = False
+    has_card_content = False
 
     # ВСЕГДА показываем оригинальный текст
     if tweet.text:
@@ -177,13 +176,17 @@ def format_tweet_card(tweet: Tweet, include_translation: bool = False, user_comm
 
             cleaned_text = clean_tweet_text(text_to_display)
             if cleaned_text.strip():
+                lines.append("")
                 lines.append(cleaned_text)
                 has_main_text = True
+                has_card_content = True
 
     # Quoted tweet - blockquote (содержит данные ОРИГИНАЛЬНОГО автора)
     if tweet.quoted_tweet:
         # Пустая строка перед цитатой ТОЛЬКО если был текст основного твита
         if has_main_text:
+            lines.append("")
+        elif not has_card_content:
             lines.append("")
 
         q = tweet.quoted_tweet
@@ -205,12 +208,15 @@ def format_tweet_card(tweet: Tweet, include_translation: bool = False, user_comm
 
         quoted_content = "\n".join(quoted_lines)
         lines.append(f"<blockquote>{quoted_content}</blockquote>")
+        has_card_content = True
     else:
         # Если нет quoted_tweet объекта, ищем Quoting/Цитируя в тексте и оформляем как blockquote
         marker = find_quoting_marker(tweet.text or "")
         if marker:
             # Пустая строка перед цитатой ТОЛЬКО если был текст основного твита
             if has_main_text:
+                lines.append("")
+            elif not has_card_content:
                 lines.append("")
 
             # Находим позицию маркера и берём текст после него
@@ -235,6 +241,7 @@ def format_tweet_card(tweet: Tweet, include_translation: bool = False, user_comm
                         quoted_parts.append(cleaned_body)
                     quoted_text = "\n".join(quoted_parts)
                     lines.append(f"<blockquote>{quoted_text}</blockquote>")
+                    has_card_content = True
                 else:
                     quoting_text = clean_tweet_text(quoting_text)
                     author_line = extract_author_line_from_main(tweet.text or "")
@@ -243,11 +250,29 @@ def format_tweet_card(tweet: Tweet, include_translation: bool = False, user_comm
                         lines.append(f"<blockquote>{cleaned_author}\n{quoting_text}</blockquote>")
                     else:
                         lines.append(f"<blockquote>{quoting_text}</blockquote>")
+                    has_card_content = True
 
-    lines.append("")  # Пустая строка после контента
+    if tweet.parent_tweet:
+        lines.append("")
+        parent = tweet.parent_tweet
+        parent_lines = [
+            f'↩️ В ответ на {escape(parent.display_name)} '
+            f'(<a href="https://x.com/{escape(parent.username)}">@{escape(parent.username)}</a>)'
+        ]
+        cleaned_parent = clean_tweet_text(parent.text)
+        if cleaned_parent.strip():
+            parent_lines.append(cleaned_parent)
+        parent_content = "\n".join(parent_lines)
+        lines.append(f"<blockquote>{parent_content}</blockquote>")
+        has_card_content = True
+
+    if has_card_content:
+        lines.append("")
 
     # Опрос (если есть) - ДО статистики
     if tweet.poll:
+        if not has_card_content:
+            lines.append("")
         lines.append(format_poll(tweet.poll))
         lines.append("")
 

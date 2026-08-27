@@ -138,3 +138,116 @@ def test_parse_tweet_api_minimal_payload():
     assert tweet.stats.likes == 12
     assert tweet.stats.reposts == 1500
     assert tweet.stats.views == 2_000_000
+
+
+def test_parse_tweet_api_accepts_media_only_gif_and_dimensions():
+    tweet = parse_tweet_api(
+        {
+            "tweet": {
+                "text": "",
+                "author": {"name": "Loop", "screen_name": "loop"},
+                "media": {
+                    "all": [
+                        {
+                            "type": "animated_gif",
+                            "url": "https://video.twimg.com/tweet_video/loop.mp4",
+                            "width": 640,
+                            "height": 360,
+                            "duration_millis": 4200,
+                        }
+                    ]
+                },
+            }
+        },
+        "https://x.com/loop/status/2",
+    )
+
+    assert tweet is not None
+    assert tweet.text == ""
+    assert tweet.media[0].type == "animation"
+    assert tweet.media[0].width == 640
+    assert tweet.media[0].height == 360
+    assert tweet.media[0].duration == 4
+
+
+def test_parse_tweet_api_extracts_quote_media_and_parent():
+    tweet = parse_tweet_api(
+        {
+            "tweet": {
+                "text": "Reply with quote",
+                "author": {"name": "Outer", "screen_name": "outer"},
+                "quote": {
+                    "id": "10",
+                    "text": "Quoted",
+                    "author": {"name": "Quoted author", "screen_name": "quoted"},
+                    "media": {
+                        "photos": [
+                            {"url": "https://pbs.twimg.com/media/one.jpg"},
+                            {"url": "https://pbs.twimg.com/media/two.jpg"},
+                        ]
+                    },
+                },
+                "parent_tweet": {
+                    "id": "9",
+                    "text": "Parent",
+                    "author": {"name": "Parent author", "screen_name": "parent"},
+                },
+            }
+        },
+        "https://x.com/outer/status/11",
+    )
+
+    assert tweet is not None
+    assert tweet.quoted_tweet is not None
+    assert [item.url for item in tweet.quoted_tweet.media] == [
+        "https://pbs.twimg.com/media/one.jpg",
+        "https://pbs.twimg.com/media/two.jpg",
+    ]
+    assert tweet.parent_tweet is not None
+    assert tweet.parent_tweet.username == "parent"
+
+
+def test_parse_tweet_api_v2_thread_uses_original_photos_and_parent_status():
+    tweet = parse_tweet_api(
+        {
+            "status": {
+                "id": "11",
+                "text": "Reply",
+                "author": {"name": "Outer", "screen_name": "outer"},
+                "replying_to": {
+                    "screen_name": "parent",
+                    "display_name": "Parent author",
+                    "status": "10",
+                    "url": "https://x.com/parent/status/10",
+                },
+                "media": {
+                    "all": [{"type": "mosaic_photo", "url": "https://mosaic.fxtwitter.com/11/a/b"}],
+                    "photos": [
+                        {"type": "photo", "url": "https://pbs.twimg.com/media/one.jpg"},
+                        {"type": "photo", "url": "https://pbs.twimg.com/media/two.jpg"},
+                    ],
+                },
+                "translation": {"text": "Ответ", "source_lang_en": "English"},
+            },
+            "thread": [
+                {
+                    "id": "10",
+                    "text": "Parent text",
+                    "author": {"name": "Parent author", "screen_name": "parent"},
+                    "media": {"photos": [{"url": "https://pbs.twimg.com/media/parent.jpg"}]},
+                }
+            ],
+        },
+        "https://x.com/outer/status/11",
+    )
+
+    assert tweet is not None
+    assert [item.url for item in tweet.media] == [
+        "https://pbs.twimg.com/media/one.jpg",
+        "https://pbs.twimg.com/media/two.jpg",
+    ]
+    assert tweet.parent_tweet is not None
+    assert tweet.parent_tweet.text == "Parent text"
+    assert tweet.parent_tweet.media[0].url == "https://pbs.twimg.com/media/parent.jpg"
+    assert tweet.translated_text == "Ответ"
+    assert tweet.source_language == "English"

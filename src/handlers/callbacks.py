@@ -1,12 +1,21 @@
 """Callback handlers for inline menus."""
 
+from __future__ import annotations
+
 import logging
 from html import escape
 
-from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
-from telegram.ext import ContextTypes
+from aiogram.enums import ParseMode
+
+from src.telegram_runtime import (
+    BadRequest,
+    CallbackQueryAdapter as CallbackQuery,
+    ContextTypes,
+    Forbidden,
+    TelegramError,
+    Update,
+)
+from src.telegram_ui import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.config import config
 from src.handlers.menus import (
@@ -25,6 +34,9 @@ from src.handlers.menus import (
     CB_SETTINGS_SENDER_SET,
     CB_SETTINGS_TOGGLE,
     CB_SETTINGS_RESET,
+    CB_INLINE_CACHE,
+    CB_INLINE_CACHE_BIND,
+    CB_INLINE_CACHE_DISABLE,
     CB_TRANSLATE_GROUP,
     CB_TRANSLATE_SET,
     CB_TRANSLATE_USER,
@@ -40,6 +52,8 @@ from src.handlers.menus import (
     get_main_menu_text,
     get_scope_settings_keyboard,
     get_scope_settings_text,
+    get_inline_cache_keyboard,
+    get_inline_cache_text,
     get_sender_mode_keyboard,
     get_settings_hub_keyboard,
     get_settings_hub_text,
@@ -113,6 +127,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await handle_sender_mode_set(query, context, user_id, callback_data)
     elif callback_data.startswith(CB_SETTINGS_SENDER):
         await show_sender_mode(query, context, user_id, callback_data)
+    elif callback_data == CB_INLINE_CACHE:
+        await show_inline_cache(query, context, user_id)
+    elif callback_data == CB_INLINE_CACHE_BIND:
+        await begin_inline_cache_binding(query, context, user_id)
+    elif callback_data == CB_INLINE_CACHE_DISABLE:
+        await disable_inline_cache(query, context, user_id)
     elif callback_data == CALLBACK_TRANSLATE:
         await show_translate_scope(query)
     elif callback_data == CALLBACK_DOWNLOADS:
@@ -467,6 +487,51 @@ async def show_global_settings(query: CallbackQuery, context: ContextTypes.DEFAU
         await query.answer("Глобальные настройки доступны только администратору", show_alert=True)
         return
     await show_scope_settings(query, context, "global", GLOBAL_OWNER_ID)
+
+
+async def show_inline_cache(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    if not _is_private(query) or not is_admin(user_id):
+        await query.answer("Медиакэш доступен только администратору", show_alert=True)
+        return
+    database = await _require_database(query, context)
+    if database is None:
+        return
+    raw_chat_id = await database.get_setting("global", GLOBAL_OWNER_ID, "inline_cache_chat_id")
+    try:
+        cache_chat_id = int(raw_chat_id) if raw_chat_id else None
+    except ValueError:
+        cache_chat_id = None
+    await query.edit_message_text(
+        text=get_inline_cache_text(cache_chat_id),
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_inline_cache_keyboard(cache_chat_id),
+    )
+
+
+async def begin_inline_cache_binding(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    if not _is_private(query) or not is_admin(user_id):
+        await query.answer("Недостаточно прав", show_alert=True)
+        return
+    pending = context.application.bot_data.setdefault("pending_cache_bindings", set())
+    if isinstance(pending, set):
+        pending.add(user_id)
+    await query.edit_message_text(
+        text=get_inline_cache_text(None, pending=True),
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_inline_cache_keyboard(None, pending=True),
+    )
+
+
+async def disable_inline_cache(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    if not _is_private(query) or not is_admin(user_id):
+        await query.answer("Недостаточно прав", show_alert=True)
+        return
+    database = await _require_database(query, context)
+    if database is None:
+        return
+    await database.delete_setting("global", GLOBAL_OWNER_ID, "inline_cache_chat_id")
+    await query.answer("Медиакэш отключён")
+    await show_inline_cache(query, context, user_id)
 
 
 async def show_group_settings(
@@ -876,7 +941,7 @@ async def _user_can_manage_group(
         logger.debug("Не удалось проверить админство user_id=%s chat_id=%s", user_id, chat_id, exc_info=True)
         return False
 
-    status = str(member.status)
+    status = str(getattr(member.status, "value", member.status))
     if status in {"left", "kicked", "banned"}:
         return False
     return linked_as_adder or status in {"administrator", "creator", "owner"}

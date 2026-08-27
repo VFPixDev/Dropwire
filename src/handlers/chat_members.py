@@ -2,8 +2,7 @@
 
 import logging
 
-from telegram import Update
-from telegram.ext import ContextTypes
+from src.telegram_runtime import ContextTypes, Update
 
 from src.services.database import Database
 

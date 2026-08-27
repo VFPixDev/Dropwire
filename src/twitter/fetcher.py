@@ -94,9 +94,12 @@ async def _get_with_retry(
 
 async def fetch_tweet_data(tweet_id: str, username: str, lang_code: Optional[str] = None) -> Optional[dict]:
     """Получает данные твита через FxTwitter API."""
-    api_url = f"{config.FX_BASE_URL}/api/status/{tweet_id}"
+    api_url = httpx.URL(f"https://api.fxtwitter.com/2/thread/{tweet_id}")
+    if lang_code:
+        api_url = api_url.copy_add_param("lang", lang_code)
+    api_url_text = str(api_url)
 
-    logger.info("Запрос API твита: %s", api_url)
+    logger.info("Запрос API твита: %s", api_url_text)
 
     timeout = httpx.Timeout(30.0, connect=10.0)
 
@@ -113,7 +116,7 @@ async def fetch_tweet_data(tweet_id: str, username: str, lang_code: Optional[str
 
             response = await _get_with_retry(
                 client,
-                api_url,
+                api_url_text,
                 headers,
                 max_bytes=config.PROVIDER_RESPONSE_MAX_KB * 1024,
             )
@@ -134,20 +137,20 @@ async def fetch_tweet_data(tweet_id: str, username: str, lang_code: Optional[str
                     logger.warning("FxTwitter API вернул некорректный JSON: %s", exc)
                     return None
             if response.status_code == 404:
-                logger.warning("Твит не найден: %s", api_url)
+                logger.warning("Твит не найден: %s", api_url_text)
                 return None
             if response.status_code in [403, 401]:
-                logger.warning("Твит недоступен: %s", api_url)
+                logger.warning("Твит недоступен: %s", api_url_text)
                 return None
 
-            logger.error("Ошибка HTTP %s: %s", response.status_code, api_url)
+            logger.error("Ошибка HTTP %s: %s", response.status_code, api_url_text)
             return None
         except httpx.TimeoutException:
-            logger.error("Таймаут при запросе: %s", api_url)
+            logger.error("Таймаут при запросе: %s", api_url_text)
             return None
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response else "unknown"
-            logger.error("Ошибка HTTP %s: %s", status, api_url)
+            logger.error("Ошибка HTTP %s: %s", status, api_url_text)
             return None
         except Exception as exc:
             logger.error("Ошибка при получении твита: %s", exc)

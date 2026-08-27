@@ -6,14 +6,14 @@ Dropwire is one Telegram bot that turns social links into compact media cards.
 
 ## Providers
 
-- Twitter/X: text, media, stats, quotes, polls and optional translation.
+- Twitter/X: text, photos, native GIF animations, video, stats, quotes, replies, polls and optional translation.
 - YouTube: thumbnail, title, author, duration, date, stats and browser downloads.
 - Spotify: artwork and title without credentials; richer metadata with optional API credentials.
 - SoundCloud: artwork, title and author through the official oEmbed endpoint.
 
 Every card can include source, media type and author hashtags. A comment before the first link is rendered as a sender quote. Multiple supported links in one message are handled in order.
 
-Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated result. Twitter/X video posts are sent as native Telegram videos; Twitter photo posts and all other providers keep their compact cards. Telegram does not expose the destination chat ID to inline bots, so inline results use the sender's DM settings over global defaults; group-specific settings cannot apply.
+Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated result. Twitter/X uses Telegram Rich Messages for text above media, native multi-photo collages, quoted/replied-to post media and the original-link button in one message. GIF posts use native Telegram animation playback. Telegram does not expose the destination chat ID to inline bots, so inline results use the sender's DM settings over global defaults; group-specific settings cannot apply.
 
 ## Telegram UX
 
@@ -23,6 +23,7 @@ Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <li
 - `/help` - supported links and usage.
 - `/status` - runtime status for the owner, settings for other users.
 - `/admin` - owner-only provider controls and runtime counters.
+- `/del` - in a group, reply to a Dropwire card to remove it. The original link sender and group administrators are allowed.
 
 Settings are deliberately separated by scope:
 
@@ -55,6 +56,18 @@ docker compose ps
 ```
 
 Enable inline mode once in `@BotFather`: run `/setinline`, select `@dropwire_bot`, and set a placeholder such as `Вставьте ссылку из Twitter, YouTube, Spotify или SoundCloud`.
+
+### Inline media cache
+
+Rich inline messages can reuse only media already uploaded to Telegram. To enable Twitter collages:
+
+1. Create a private Telegram channel, for example `Dropwire Cache`.
+2. Add the bot as an administrator with permission to post messages.
+3. Open the bot DM as a user listed in `BOT_ADMIN_IDS`.
+4. Open `Settings` → `Global` → `Inline media cache` → `Bind channel`.
+5. Forward any post from the private channel to the bot.
+
+The channel stores media messages and SQLite stores their `file_id` values. If the channel is not configured or Telegram rejects a cached file, Dropwire automatically uses its compact inline fallback.
 
 The web service is exposed on `http://localhost:8080` by default. YouTube browser links stay disabled until `WEB_BASE_URL` is a public HTTPS address that reaches this service.
 

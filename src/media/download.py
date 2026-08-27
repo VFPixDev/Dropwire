@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def _media_extension(url: str, media_type: str) -> str:
-    if media_type == "video":
+    if media_type in {"video", "animation"}:
         return ".mp4"
 
     lowered_url = url.lower()

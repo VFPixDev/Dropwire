@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,12 +96,43 @@ class Database:
                 FOREIGN KEY(request_id) REFERENCES download_requests(id)
             );
 
+            CREATE TABLE IF NOT EXISTS media_cache (
+                source_url TEXT PRIMARY KEY,
+                media_type TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                file_unique_id TEXT,
+                width INTEGER,
+                height INTEGER,
+                duration INTEGER,
+                cached_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                source_message_id INTEGER NOT NULL,
+                requester_user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(chat_id, source_message_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS delivery_messages (
+                delivery_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (delivery_id, message_id),
+                FOREIGN KEY(delivery_id) REFERENCES deliveries(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_download_requests_user_status
                 ON download_requests(telegram_id, status);
             CREATE INDEX IF NOT EXISTS idx_downloads_request
                 ON downloads(request_id);
             CREATE INDEX IF NOT EXISTS idx_groups_updated
                 ON groups(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_media_cache_cached_at
+                ON media_cache(cached_at);
+            CREATE INDEX IF NOT EXISTS idx_delivery_messages_message
+                ON delivery_messages(message_id);
             """
         )
         await self.conn.commit()
@@ -207,6 +238,121 @@ class Database:
         )
         row = await cursor.fetchone()
         return str(row["value"]) if row else None
+
+    async def delete_setting(self, scope: str, owner_id: int, name: str) -> None:
+        await self.conn.execute(
+            "DELETE FROM settings WHERE scope = ? AND owner_id = ? AND name = ?",
+            (scope, owner_id, name),
+        )
+        await self.conn.commit()
+
+    async def get_cached_media(self, source_url: str) -> aiosqlite.Row | None:
+        cursor = await self.conn.execute("SELECT * FROM media_cache WHERE source_url = ?", (source_url,))
+        return await cursor.fetchone()
+
+    async def upsert_cached_media(
+        self,
+        source_url: str,
+        media_type: str,
+        file_id: str,
+        file_unique_id: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        duration: int | None = None,
+    ) -> None:
+        await self.conn.execute(
+            """
+            INSERT INTO media_cache (
+                source_url, media_type, file_id, file_unique_id,
+                width, height, duration, cached_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_url) DO UPDATE SET
+                media_type = excluded.media_type,
+                file_id = excluded.file_id,
+                file_unique_id = excluded.file_unique_id,
+                width = excluded.width,
+                height = excluded.height,
+                duration = excluded.duration,
+                cached_at = excluded.cached_at
+            """,
+            (source_url, media_type, file_id, file_unique_id, width, height, duration, _utc_now()),
+        )
+        await self.conn.commit()
+
+    async def delete_cached_media(self, source_urls: list[str]) -> None:
+        if not source_urls:
+            return
+        await self.conn.executemany(
+            "DELETE FROM media_cache WHERE source_url = ?",
+            [(source_url,) for source_url in source_urls],
+        )
+        await self.conn.commit()
+
+    async def record_delivery_message(
+        self,
+        chat_id: int,
+        source_message_id: int,
+        requester_user_id: int,
+        output_message_id: int,
+    ) -> None:
+        now = _utc_now()
+        await self.conn.execute(
+            """
+            INSERT INTO deliveries (chat_id, source_message_id, requester_user_id, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id, source_message_id) DO UPDATE SET
+                requester_user_id = excluded.requester_user_id
+            """,
+            (chat_id, source_message_id, requester_user_id, now),
+        )
+        cursor = await self.conn.execute(
+            "SELECT id FROM deliveries WHERE chat_id = ? AND source_message_id = ?",
+            (chat_id, source_message_id),
+        )
+        row = await cursor.fetchone()
+        if row is not None:
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO delivery_messages (delivery_id, message_id) VALUES (?, ?)",
+                (int(row["id"]), output_message_id),
+            )
+        await self.conn.commit()
+
+    async def get_delivery_for_message(self, chat_id: int, output_message_id: int) -> dict[str, Any] | None:
+        cursor = await self.conn.execute(
+            """
+            SELECT deliveries.*
+            FROM deliveries
+            JOIN delivery_messages ON delivery_messages.delivery_id = deliveries.id
+            WHERE deliveries.chat_id = ? AND delivery_messages.message_id = ?
+            """,
+            (chat_id, output_message_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        message_cursor = await self.conn.execute(
+            "SELECT message_id FROM delivery_messages WHERE delivery_id = ? ORDER BY message_id",
+            (int(row["id"]),),
+        )
+        message_rows = await message_cursor.fetchall()
+        return {
+            "id": int(row["id"]),
+            "chat_id": int(row["chat_id"]),
+            "source_message_id": int(row["source_message_id"]),
+            "requester_user_id": int(row["requester_user_id"]),
+            "message_ids": [int(item["message_id"]) for item in message_rows],
+            "created_at": str(row["created_at"]),
+        }
+
+    async def delete_delivery(self, delivery_id: int) -> None:
+        await self.conn.execute("DELETE FROM deliveries WHERE id = ?", (delivery_id,))
+        await self.conn.commit()
+
+    async def prune_deliveries(self, max_age_hours: int = 48) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, max_age_hours))).isoformat()
+        cursor = await self.conn.execute("DELETE FROM deliveries WHERE created_at < ?", (cutoff,))
+        await self.conn.commit()
+        return max(cursor.rowcount, 0)
 
     async def get_settings(self, scope: str, owner_id: int) -> dict[str, str]:
         cursor = await self.conn.execute(

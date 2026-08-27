@@ -234,3 +234,66 @@ def test_provider_switches_are_global_and_default_to_enabled(tmp_path):
             await database.close()
 
     asyncio.run(run())
+
+
+def test_media_cache_round_trip(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            await database.upsert_cached_media(
+                "https://pbs.twimg.com/media/example.jpg",
+                "photo",
+                "telegram-file-id",
+                "unique-id",
+                width=1200,
+                height=800,
+            )
+            cached = await database.get_cached_media("https://pbs.twimg.com/media/example.jpg")
+            assert cached is not None
+            assert cached["file_id"] == "telegram-file-id"
+            assert cached["width"] == 1200
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_delivery_lookup_returns_every_output_message(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            await database.record_delivery_message(-100, 10, 42, 20)
+            await database.record_delivery_message(-100, 10, 42, 21)
+            delivery = await database.get_delivery_for_message(-100, 21)
+            assert delivery is not None
+            assert delivery["requester_user_id"] == 42
+            assert delivery["message_ids"] == [20, 21]
+
+            await database.delete_delivery(delivery["id"])
+            assert await database.get_delivery_for_message(-100, 20) is None
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_delete_cached_media_removes_only_selected_urls(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            await database.upsert_cached_media("https://pbs.twimg.com/media/one.jpg", "photo", "one")
+            await database.upsert_cached_media("https://pbs.twimg.com/media/two.jpg", "photo", "two")
+            await database.delete_cached_media(["https://pbs.twimg.com/media/one.jpg"])
+
+            assert await database.get_cached_media("https://pbs.twimg.com/media/one.jpg") is None
+            assert await database.get_cached_media("https://pbs.twimg.com/media/two.jpg") is not None
+        finally:
+            await database.close()
+
+    asyncio.run(run())

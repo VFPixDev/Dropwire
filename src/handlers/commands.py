@@ -2,9 +2,10 @@
 
 import logging
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
-from telegram.ext import ContextTypes
+from aiogram.enums import ParseMode
+
+from src.telegram_runtime import ContextTypes, Update
+from src.telegram_ui import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.handlers.menus import (
     get_admin_keyboard,

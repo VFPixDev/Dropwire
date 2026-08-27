@@ -1,12 +1,21 @@
+import asyncio
 from datetime import datetime
+from types import SimpleNamespace
 
-from telegram import InlineQueryResultArticle, InlineQueryResultPhoto, InlineQueryResultVideo, User
+from aiogram.types import InlineQueryResultArticle, InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, User
 
-from src.handlers.inline import _build_result, _build_twitter_result, _prepend_sender_quote, _url_only_keyboard
+from src.handlers.inline import (
+    _build_result,
+    _build_rich_twitter_result,
+    _build_twitter_result,
+    _prepend_sender_quote,
+    _url_only_keyboard,
+)
 from src.models.media_card import Button, MediaCard
 from src.providers.link_router import LinkMatch
 from src.services.settings import EffectiveSettings
-from src.twitter.models import MediaItem, Tweet
+from src.services.database import Database
+from src.twitter.models import MediaItem, QuotedTweet, Tweet
 
 
 def _settings(**overrides) -> EffectiveSettings:
@@ -138,3 +147,88 @@ def test_twitter_inline_result_rejects_untrusted_video_url():
 
     assert isinstance(built.primary, InlineQueryResultPhoto)
     assert isinstance(built.fallback, InlineQueryResultArticle)
+
+
+def test_twitter_inline_animation_uses_native_mpeg4_gif_result():
+    link = LinkMatch("twitter", "https://x.com/example/status/321", 0)
+    thumbnail = "https://pbs.twimg.com/tweet_video_thumb/321/preview.jpg"
+    tweet = Tweet(
+        display_name="Example",
+        username="example",
+        url=link.url,
+        text="GIF post",
+        date=datetime(2026, 8, 27),
+        media=[
+            MediaItem(
+                type="animation",
+                url="https://video.twimg.com/tweet_video/clip.mp4",
+                thumbnail_url=thumbnail,
+                width=640,
+                height=360,
+                duration=4,
+            )
+        ],
+    )
+
+    built = _build_twitter_result(
+        link, tweet, "Example (@example)", "GIF post", "GIF post", thumbnail, None, _settings()
+    )
+
+    assert isinstance(built.primary, InlineQueryResultMpeg4Gif)
+    assert built.primary.mpeg4_width == 640
+    assert built.primary.mpeg4_height == 360
+
+
+def test_rich_inline_collage_supports_quote_media_without_outer_media(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            await database.set_setting("global", 0, "inline_cache_chat_id", "-100123")
+            urls = [
+                "https://pbs.twimg.com/media/quote-one.jpg",
+                "https://pbs.twimg.com/media/quote-two.jpg",
+            ]
+            for index, url in enumerate(urls):
+                await database.upsert_cached_media(url, "photo", f"file-{index}", width=1200, height=800)
+
+            link = LinkMatch("twitter", "https://x.com/outer/status/11", 0)
+            tweet = Tweet(
+                display_name="Outer",
+                username="outer",
+                url=link.url,
+                text="Reply",
+                date=datetime(2026, 8, 27),
+                quoted_tweet=QuotedTweet(
+                    display_name="Quoted",
+                    username="quoted",
+                    url="https://x.com/quoted/status/10",
+                    text="Original",
+                    media=[MediaItem(type="photo", url=url) for url in urls],
+                ),
+            )
+            update = SimpleNamespace(get_bot=lambda: None)
+            built = await _build_rich_twitter_result(
+                update,
+                database,
+                link,
+                tweet,
+                "Outer (@outer)",
+                "Reply",
+                "Text above media",
+                urls[0],
+                None,
+                _settings(),
+            )
+
+            assert built is not None
+            rich = built.primary.input_message_content.rich_message
+            assert rich.html.startswith("Text above media")
+            assert "<tg-collage>" in rich.html
+            assert "Медиа цитируемого поста" in rich.html
+            assert len(rich.media) == 2
+        finally:
+            await database.close()
+
+    asyncio.run(run())

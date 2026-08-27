@@ -1,4 +1,4 @@
-from telegram import User
+from aiogram.types import User
 
 from src.utils.sender_quote import format_sender_quote
 

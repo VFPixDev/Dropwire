@@ -4,6 +4,7 @@ import logging
 import tempfile
 from datetime import datetime
 from typing import Optional
+from urllib.parse import unquote, urlparse
 from bs4 import BeautifulSoup
 from src.twitter.models import Tweet, TweetStats, MediaItem, QuotedTweet, Poll, PollOption
 from src.config import config
@@ -108,6 +109,32 @@ def extract_og_meta(soup: BeautifulSoup, property_name: str) -> Optional[str]:
     if tag and tag.get("content"):
         return tag["content"]
     return None
+
+
+def extract_image_meta(soup: BeautifulSoup) -> list[str]:
+    """Collect every Open Graph/Twitter image URL in document order."""
+    urls: list[str] = []
+    for tag in soup.find_all("meta"):
+        key = str(tag.get("property") or tag.get("name") or "").lower()
+        if not re.fullmatch(r"(?:og|twitter):image(?::\d+)?", key):
+            continue
+        url = str(tag.get("content") or "").strip()
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def extract_mosaic_photo_urls(url: str) -> list[str]:
+    """Expand an FxTwitter HTML mosaic URL into original Twitter photos."""
+    segments = [unquote(part) for part in urlparse(url).path.split("/") if part]
+    status_index = next((index for index, part in enumerate(segments) if part.isdigit()), None)
+    candidates = segments[status_index + 1 :] if status_index is not None else segments[1:]
+    photo_ids: list[str] = []
+    for candidate in candidates:
+        photo_id = candidate.split(".", 1)[0]
+        if re.fullmatch(r"[A-Za-z0-9_-]+", photo_id) and photo_id not in photo_ids:
+            photo_ids.append(photo_id)
+    return [f"https://pbs.twimg.com/media/{photo_id}?format=jpg&name=orig" for photo_id in photo_ids[:4]]
 
 
 def parse_poll_from_html(soup: BeautifulSoup) -> Optional[Poll]:
@@ -359,7 +386,7 @@ def parse_tweet_html(html: str, original_url: str) -> Optional[Tweet]:
 
                 logger.debug(f"Quoted content has {len(quoted_content)} lines")
 
-            if quoted_author and quoted_content:
+            if quoted_author:
                 quoted_text = " ".join(quoted_content)
                 quoted = QuotedTweet(
                     display_name=quoted_display or quoted_author,
@@ -391,64 +418,47 @@ def parse_tweet_html(html: str, original_url: str) -> Optional[Tweet]:
     video_url = extract_og_meta(soup, "og:video") or extract_og_meta(soup, "twitter:player:stream")
     if video_url and not video_url.startswith("blob:"):
         logger.debug(f"Found video: {video_url}")
-        media.append(MediaItem(type="video", url=video_url))
+        media_type = "animation" if "tweet_video" in video_url else "video"
+        media.append(MediaItem(type=media_type, url=video_url))
         has_video = True
 
     # Фото (может быть мозаика или отдельное изображение)
-    image_url = extract_og_meta(soup, "og:image") or extract_og_meta(soup, "twitter:image")
-    if image_url:
+    image_urls = extract_image_meta(soup)
+    for image_url in image_urls:
         # Пропускаем если это фото профиля
         if "profile_images" in image_url:
             logger.debug(f"Skipping profile image: {image_url}")
-            image_url = None
+            continue
         # Если есть видео и это превью - сохраняем URL и пропускаем
         elif has_video and is_video_thumbnail(image_url):
             logger.debug(f"Skipping video thumbnail: {image_url}")
             video_thumb_urls.add(image_url)
-            image_url = None
+            continue
         # Проверяем если это мозаика fxtwitter
         elif "mosaic.fxtwitter.com" in image_url:
             logger.debug(f"Found mosaic image: {image_url}")
-            # Парсим мозаику и создаем отдельные ссылки
-            parts = image_url.split("/")
-            photo_ids = parts[5:]  # Все ID после tweet_id
-
-            for photo_id in photo_ids:
-                if photo_id:
-                    twitter_photo_url = f"https://pbs.twimg.com/media/{photo_id}?format=jpg&name=orig"
+            for twitter_photo_url in extract_mosaic_photo_urls(image_url):
+                if twitter_photo_url not in [item.url for item in media]:
                     media.append(MediaItem(type="photo", url=twitter_photo_url))
-                    logger.debug(f"Added photo from mosaic: {photo_id}")
-            image_url = None
-        elif image_url:
+                    logger.debug(f"Added photo from mosaic: {twitter_photo_url}")
+        elif not has_video and image_url not in [item.url for item in media]:
             # Обычное одиночное фото
             logger.debug(f"Found image: {image_url}")
             media.append(MediaItem(type="photo", url=image_url))
-            image_url = None
-
-        # Дополнительные фото (только если нет видео)
-        if not has_video:
-            for i in range(1, 5):
-                img_url = extract_og_meta(soup, f"twitter:image:{i}") or extract_og_meta(soup, f"og:image:{i}")
-                if img_url and img_url not in [m.url for m in media]:
-                    # Проверяем что это не превью и не профиль
-                    if not is_video_thumbnail(img_url) and "profile_images" not in img_url:
-                        logger.debug(f"Found additional image: {img_url}")
-                        media.append(MediaItem(type="photo", url=img_url))
 
     # Если есть видео, проверяем дополнительные изображения и исключаем превью
     if has_video:
-        for i in range(1, 5):
-            img_url = extract_og_meta(soup, f"twitter:image:{i}") or extract_og_meta(soup, f"og:image:{i}")
-            if img_url:
-                if is_video_thumbnail(img_url):
-                    video_thumb_urls.add(img_url)
-                    logger.debug(f"Found and skipping video thumbnail {i}: {img_url}")
-
         if video_thumb_urls:
             thumbnail_url = sorted(video_thumb_urls)[0]
             for media_item in media:
-                if media_item.type == "video" and not media_item.thumbnail_url:
+                if media_item.type in {"video", "animation"} and not media_item.thumbnail_url:
                     media_item.thumbnail_url = thumbnail_url
+
+    # FxTwitter's HTML preview exposes quote media as the page media. If the
+    # outer post has no own text, keep that media attached to the nested quote.
+    if quoted is not None and media and quote_pos is not None and not text[:quote_pos].strip():
+        quoted.media = media
+        media = []
 
     logger.debug(f"Total media items: {len(media)}, video thumbnails skipped: {len(video_thumb_urls)}")
 

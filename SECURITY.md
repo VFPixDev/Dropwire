@@ -27,6 +27,10 @@
 - Exact provider host matching to reject lookalike domains.
 - HTML escaping for user, channel and group supplied text.
 - No automatic retry after ambiguous Telegram upload timeouts.
+- Trusted-host validation before Twitter media is placed in the inline cache.
+- Owner-only inline cache binding with live Telegram channel-admin checks.
+- Group card deletion authorized against the original requester, bot owners or live group administrators.
+- Delivery records expire after Telegram's 48-hour deletion window.
 - Dependency vulnerability audit in the documented test flow.
 - Read-only non-root containers with all Linux capabilities dropped and loopback-only web binding by default.
 
