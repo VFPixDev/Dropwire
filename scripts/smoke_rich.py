@@ -14,7 +14,17 @@ from src.services.settings import EffectiveSettings
 from src.telegram_runtime import BotAdapter, Update
 from src.twitter.models import MediaItem, Tweet
 
-TEST_IMAGE = "https://pbs.fxtwitter.com/media/HNQNOONaAAAD8zn.jpg"
+TEST_MEDIA = [
+    MediaItem(
+        type="video",
+        url="https://video.twimg.com/amplify_video/2092881459765772288/vid/avc1/1080x1920/X4QGDads6kz9Rejj.mp4?tag=29",
+        width=1080,
+        height=1920,
+        duration=74,
+    ),
+    MediaItem(type="photo", url="https://pbs.twimg.com/media/HQtomVVWUAAZWWx.jpg?name=orig"),
+    MediaItem(type="photo", url="https://pbs.twimg.com/media/HQtomWNWAAA6GNO.jpg?name=orig"),
+]
 
 
 def _settings() -> EffectiveSettings:
@@ -45,12 +55,9 @@ async def main() -> int:
             display_name="Dropwire smoke",
             username="Dropwire",
             url=link.url,
-            text="Rich Message validation",
+            text="Mixed video and photo Rich Message validation",
             date=datetime.now(),
-            media=[
-                MediaItem(type="photo", url=f"{TEST_IMAGE}?name=orig"),
-                MediaItem(type="photo", url=f"{TEST_IMAGE}?name=large"),
-            ],
+            media=TEST_MEDIA,
         )
         await database.delete_cached_media([item.url for item in tweet.media])
         keyboard = InlineKeyboardMarkup(
@@ -62,7 +69,7 @@ async def main() -> int:
             link,
             tweet,
             "Dropwire Rich Message",
-            "Live collage validation",
+            "Live mixed-media validation",
             "Text above media",
             tweet.media[0].url,
             keyboard,
@@ -75,8 +82,9 @@ async def main() -> int:
         rich_message = built.primary.input_message_content.rich_message
         sent = await raw_bot.send_rich_message(chat_id=chat_id, rich_message=rich_message, reply_markup=keyboard)
         await raw_bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-        print(f"rich: ok (attachments={len(rich_message.media or [])})")
-        return 0
+        attachments = len(rich_message.media or [])
+        print(f"rich: ok (attachments={attachments})")
+        return 0 if attachments == 3 else 1
     finally:
         await database.close()
         await raw_bot.session.close()

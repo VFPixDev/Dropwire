@@ -127,3 +127,35 @@ def test_rich_layout_nests_translated_reference_media_and_combines_footer():
         assert built.cache_urls == ()
 
     asyncio.run(run())
+
+
+def test_rich_layout_separates_video_from_photo_collage():
+    async def run():
+        video_url = "https://video.twimg.com/amplify_video/example/vid/avc1/1080x1920/video.mp4"
+        photo_urls = [
+            "https://pbs.twimg.com/media/one.jpg?name=orig",
+            "https://pbs.twimg.com/media/two.jpg?name=orig",
+        ]
+        tweet = Tweet(
+            display_name="Mixed media",
+            username="mixed",
+            url="https://x.com/mixed/status/3",
+            text="Video and two photos",
+            date=datetime(2026, 8, 27, 7, 47),
+            media=[
+                MediaItem(type="video", url=video_url, width=1080, height=1920, duration=74),
+                *(MediaItem(type="photo", url=url, width=1206, height=882) for url in photo_urls),
+            ],
+        )
+
+        built = await build_twitter_rich_message(None, None, tweet)
+
+        assert built is not None
+        html = built.message.html
+        video = '<video src="tg://video?id=m0"></video>'
+        collage = '<tg-collage><img src="tg://photo?id=m1"/><img src="tg://photo?id=m2"/></tg-collage>'
+        assert f"{video}{collage}" in html
+        assert "<tg-collage><video" not in html
+        assert [item.media.media for item in built.message.media] == [video_url, *photo_urls]
+
+    asyncio.run(run())

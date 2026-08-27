@@ -8,13 +8,15 @@ import logging
 from urllib.parse import urlparse
 
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BufferedInputFile
 
 from src.services.database import Database
-from src.twitter.fetcher import _is_trusted_twitter_media_url, get_trusted_twitter_mp4_url
+from src.twitter.fetcher import _is_trusted_twitter_media_url, download_media, get_trusted_twitter_mp4_url
 from src.twitter.models import MediaItem
 
 logger = logging.getLogger(__name__)
-_cache_upload_slots = asyncio.Semaphore(4)
+_cache_upload_slots = asyncio.Semaphore(2)
+TELEGRAM_MULTIPART_MEDIA_MAX_BYTES = 50 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -77,9 +79,12 @@ async def _get_or_upload(bot, database: Database, chat_id: int | None, item: Med
                 )
                 telegram_file = message.photo[-1] if message.photo else None
             elif item.type == "animation":
+                upload = await _download_original_upload(media_url)
+                if upload is None:
+                    return None
                 message = await bot.send_animation(
                     chat_id=chat_id,
-                    animation=media_url,
+                    animation=upload,
                     width=item.width,
                     height=item.height,
                     duration=item.duration,
@@ -88,9 +93,12 @@ async def _get_or_upload(bot, database: Database, chat_id: int | None, item: Med
                 )
                 telegram_file = message.animation
             else:
+                upload = await _download_original_upload(media_url)
+                if upload is None:
+                    return None
                 message = await bot.send_video(
                     chat_id=chat_id,
-                    video=media_url,
+                    video=upload,
                     width=item.width,
                     height=item.height,
                     duration=item.duration,
@@ -141,6 +149,13 @@ async def _delete_staging_message(bot, chat_id: int, message_id: int) -> None:
                 logger.error("Не удалось удалить временное inline-сообщение %s: %s", message_id, exc)
                 return
             await asyncio.sleep(0.25 * (2**attempt))
+
+
+async def _download_original_upload(media_url: str) -> BufferedInputFile | None:
+    content = await download_media(media_url, max_bytes=TELEGRAM_MULTIPART_MEDIA_MAX_BYTES)
+    if content is None:
+        return None
+    return BufferedInputFile(content, filename="twitter.mp4")
 
 
 def _trusted_media_url(item: MediaItem) -> str | None:

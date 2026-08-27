@@ -65,16 +65,14 @@ async def build_twitter_rich_message(
         nonlocal cursor
         selected = prepared[cursor : cursor + len(items)]
         cursor += len(items)
-        refs: list[str] = []
+        refs: list[tuple[str, str]] = []
         for item in selected:
             media_id = f"m{len(attachments)}"
             attachments.append(InputRichMessageMedia(id=media_id, media=item.media))
             source = f"tg://{_rich_media_scheme(item.media_type)}?id={media_id}"
             tag = f'<img src="{source}"/>' if item.media_type == "photo" else f'<video src="{source}"></video>'
-            refs.append(tag)
-        if not refs:
-            return ""
-        return refs[0] if len(refs) == 1 else f"<tg-collage>{''.join(refs)}</tg-collage>"
+            refs.append((item.media_type, tag))
+        return _media_blocks_html(refs)
 
     html_parts: list[str] = []
     if sender_quote:
@@ -231,6 +229,26 @@ def _paragraph(content: str) -> str:
 
 def _rich_media_scheme(media_type: str) -> str:
     return "photo" if media_type == "photo" else "video"
+
+
+def _media_blocks_html(refs: list[tuple[str, str]]) -> str:
+    blocks: list[str] = []
+    photos: list[str] = []
+
+    def flush_photos() -> None:
+        if not photos:
+            return
+        blocks.append(photos[0] if len(photos) == 1 else f"<tg-collage>{''.join(photos)}</tg-collage>")
+        photos.clear()
+
+    for media_type, tag in refs:
+        if media_type == "photo":
+            photos.append(tag)
+            continue
+        flush_photos()
+        blocks.append(tag)
+    flush_photos()
+    return "".join(blocks)
 
 
 def _rich_text_html(text: str) -> str:
