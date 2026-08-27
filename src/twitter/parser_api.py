@@ -176,6 +176,7 @@ def _parse_reference(raw: Any) -> Optional[QuotedTweet]:
             username = parts[3]
     text = _first_text(raw.get("text"), raw.get("full_text"), raw.get("description"))
     media = _parse_media(raw.get("media"))
+    translated_text, source_language = _parse_translation(raw)
     if not username or not (text or media or tweet_id):
         return None
     return QuotedTweet(
@@ -186,7 +187,21 @@ def _parse_reference(raw: Any) -> Optional[QuotedTweet]:
         date=_parse_date_value(raw),
         media=media,
         tweet_id=tweet_id,
+        translated_text=translated_text,
+        source_language=source_language,
     )
+
+
+def _parse_translation(raw: dict[str, Any]) -> tuple[str | None, str | None]:
+    translation = raw.get("translation")
+    if not isinstance(translation, dict):
+        return None, None
+    translated_text = _first_text(translation.get("text")) or None
+    source_language = _first_text(
+        translation.get("source_lang_en"),
+        translation.get("source_lang"),
+    ) or None
+    return translated_text, source_language
 
 
 def parse_tweet_api(data: dict[str, Any], original_url: str) -> Optional[Tweet]:
@@ -274,15 +289,7 @@ def parse_tweet_api(data: dict[str, Any], original_url: str) -> Optional[Tweet]:
         ),
     )
 
-    translation = tweet_data.get("translation")
-    translated_text = None
-    source_language = None
-    if isinstance(translation, dict):
-        translated_text = _first_text(translation.get("text")) or None
-        source_language = _first_text(
-            translation.get("source_lang_en"),
-            translation.get("source_lang"),
-        ) or None
+    translated_text, source_language = _parse_translation(tweet_data)
 
     return Tweet(
         display_name=display_name,

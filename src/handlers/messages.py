@@ -20,6 +20,7 @@ from src.twitter.normalize import normalize_url, extract_tweet_id, extract_usern
 from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html
 from src.twitter.parser import parse_tweet_html
 from src.twitter.parser_api import parse_tweet_api
+from src.twitter.reference_translation import hydrate_reference_translations
 from src.services.database import Database
 from src.services.settings import (
     EffectiveSettings,
@@ -30,7 +31,7 @@ from src.services.settings import (
 )
 from src.services.providers import is_provider_enabled
 from src.utils.sender_quote import format_sender_quote
-from src.utils.text_format import format_tweet_card, shorten_text_for_caption
+from src.utils.text_format import format_tweet_card, format_tweet_footer, has_tweet_translation, shorten_text_for_caption
 from src.utils.rate_limit import rate_limiter
 from src.media.download import download_media_file, get_file_size_mb
 from src.media.compress import compress_image, compress_video
@@ -124,15 +125,24 @@ async def _try_send_rich_tweet_card(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     tweet,
-    card_text: str,
     thread_id: int | None,
     settings: EffectiveSettings | None,
+    user_comment: str | None,
+    hashtags: str,
 ):
-    database = context.application.bot_data.get("database")
-    if not isinstance(database, Database) or update.effective_chat is None:
+    database_value = context.application.bot_data.get("database")
+    database = database_value if isinstance(database_value, Database) else None
+    if update.effective_chat is None:
         return None
 
-    rich = await build_twitter_rich_message(context.bot, database, tweet, card_text)
+    sender_quote = build_sender_quote_prefix(update, user_comment, settings)
+    rich = await build_twitter_rich_message(
+        context.bot,
+        database,
+        tweet,
+        sender_quote=sender_quote,
+        hashtags=hashtags,
+    )
     if rich is None:
         return None
 
@@ -200,19 +210,18 @@ async def send_tweet_card(
         logger.warning("Не удалось отправить твит: нет effective_chat/effective_user")
         return
 
-    # Всегда показываем оригинальный текст
-    # Информацию о переводе добавим в конец карточки если есть
-    include_translation = bool(tweet.translated_text)
-
-    # Форматируем карточку
-    card_text = format_tweet_card(tweet, include_translation=include_translation)
-    card_text = prepend_sender_quote(card_text, update, user_comment, settings)
+    include_translation = has_tweet_translation(tweet)
+    hashtags = ""
     enable_hashtags = settings.enable_hashtags if settings else config.ENABLE_HASHTAGS
-    caption_above_media = settings.caption_above_media if settings else config.CAPTION_ABOVE_MEDIA
     if enable_hashtags:
         hashtags = render_hashtags(build_hashtags("twitter", "post", tweet.username))
-        if hashtags:
-            card_text = f"{card_text}\n\n{hashtags}"
+
+    card_text = format_tweet_card(tweet, include_translation=include_translation)
+    footer = format_tweet_footer(tweet, hashtags)
+    if footer:
+        card_text = f"{card_text}\n\n{footer}"
+    card_text = prepend_sender_quote(card_text, update, user_comment, settings)
+    caption_above_media = settings.caption_above_media if settings else config.CAPTION_ABOVE_MEDIA
 
     temp_files = []
     card_media = list(tweet.media)
@@ -222,6 +231,18 @@ async def send_tweet_card(
         card_media.extend(tweet.parent_tweet.media)
 
     try:
+        rich_sent = await _try_send_rich_tweet_card(
+            update,
+            context,
+            tweet,
+            thread_id,
+            settings,
+            user_comment,
+            hashtags,
+        )
+        if rich_sent is not None:
+            return
+
         # Если нет медиа - просто отправляем текст
         if not card_media:
             sent = await send_text_message(
@@ -235,17 +256,6 @@ async def send_tweet_card(
                 settings=settings,
             )
             await _record_delivery(update, context, sent)
-            return
-
-        rich_sent = await _try_send_rich_tweet_card(
-            update,
-            context,
-            tweet,
-            card_text,
-            thread_id,
-            settings,
-        )
-        if rich_sent is not None:
             return
 
         # Скачиваем медиа
@@ -480,6 +490,7 @@ async def process_tweet_url(
     # Если перевод не получен, но запрошен
     if lang_code and not tweet.translated_text:
         logger.info("Перевод не получен от источника")
+    await hydrate_reference_translations(tweet, lang_code)
 
     # Отправляем карточку
     try:

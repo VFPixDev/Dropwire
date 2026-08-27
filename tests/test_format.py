@@ -48,7 +48,7 @@ def test_format_poll():
     assert "завершён" in result
 
 
-def test_media_only_tweet_has_no_empty_row_before_stats():
+def test_media_only_tweet_has_exactly_one_empty_row_before_stats():
     tweet = Tweet(
         display_name="Media",
         username="media",
@@ -60,5 +60,5 @@ def test_media_only_tweet_has_no_empty_row_before_stats():
     )
 
     rendered = format_tweet_card(tweet)
-    assert "12:00\n💬 1" in rendered
-    assert "12:00\n\n💬 1" not in rendered
+    assert "12:00\n\n💬 1" in rendered
+    assert "12:00\n\n\n💬 1" not in rendered

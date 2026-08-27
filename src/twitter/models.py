@@ -46,6 +46,8 @@ class QuotedTweet:
     date: Optional[datetime] = None
     media: list[MediaItem] = field(default_factory=list)
     tweet_id: Optional[str] = None
+    translated_text: Optional[str] = None
+    source_language: Optional[str] = None
 
 
 @dataclass

@@ -1,4 +1,4 @@
-"""Live validation of the configured Telegram Rich Message media cache."""
+"""Live validation of Telegram Rich Messages without a cache channel."""
 
 import asyncio
 from datetime import datetime
@@ -35,11 +35,11 @@ async def main() -> int:
     database = Database(config.DATABASE_PATH)
     await database.connect()
     try:
-        raw_chat_id = await database.get_setting("global", 0, "inline_cache_chat_id")
-        if not raw_chat_id:
-            print("rich: skipped (inline media cache is not configured)")
+        await database.init_schema()
+        if not config.BOT_ADMIN_IDS:
+            print("rich: skipped (BOT_ADMIN_IDS is empty)")
             return 0
-        chat_id = int(raw_chat_id)
+        chat_id = config.BOT_ADMIN_IDS[0]
         link = LinkMatch("twitter", "https://x.com/Dropwire/status/1", 0)
         tweet = Tweet(
             display_name="Dropwire smoke",
@@ -52,6 +52,7 @@ async def main() -> int:
                 MediaItem(type="photo", url=f"{TEST_IMAGE}?name=large"),
             ],
         )
+        await database.delete_cached_media([item.url for item in tweet.media])
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="Open original", url=link.url)]]
         )
@@ -66,9 +67,10 @@ async def main() -> int:
             tweet.media[0].url,
             keyboard,
             _settings(),
+            staging_chat_id=chat_id,
         )
         if built is None:
-            print("rich: failed (media could not be cached)")
+            print("rich: failed (DM staging or Rich media preparation failed)")
             return 1
         rich_message = built.primary.input_message_content.rich_message
         sent = await raw_bot.send_rich_message(chat_id=chat_id, rich_message=rich_message, reply_markup=keyboard)

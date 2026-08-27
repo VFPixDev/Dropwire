@@ -185,7 +185,6 @@ def test_rich_inline_collage_supports_quote_media_without_outer_media(tmp_path):
         await database.connect()
         await database.init_schema()
         try:
-            await database.set_setting("global", 0, "inline_cache_chat_id", "-100123")
             urls = [
                 "https://pbs.twimg.com/media/quote-one.jpg",
                 "https://pbs.twimg.com/media/quote-two.jpg",
@@ -224,9 +223,13 @@ def test_rich_inline_collage_supports_quote_media_without_outer_media(tmp_path):
 
             assert built is not None
             rich = built.primary.input_message_content.rich_message
-            assert rich.html.startswith("Text above media")
+            assert rich.html.startswith('<p>Outer (<a href="https://x.com/outer">@outer</a>)')
             assert "<tg-collage>" in rich.html
-            assert "Медиа цитируемого поста" in rich.html
+            quote_start = rich.html.index("<blockquote>")
+            collage_start = rich.html.index("<tg-collage>")
+            quote_end = rich.html.index("</blockquote>")
+            assert quote_start < collage_start < quote_end
+            assert "Медиа цитируемого поста" not in rich.html
             assert len(rich.media) == 2
         finally:
             await database.close()

@@ -40,9 +40,10 @@ from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html, get_trusted_
 from src.twitter.normalize import extract_tweet_id, extract_username, normalize_url
 from src.twitter.parser import parse_tweet_html
 from src.twitter.parser_api import parse_tweet_api
+from src.twitter.reference_translation import hydrate_reference_translations
 from src.twitter.models import Tweet
 from src.utils.sender_quote import format_sender_quote
-from src.utils.text_format import format_tweet_card
+from src.utils.text_format import format_tweet_card, format_tweet_footer, has_tweet_translation
 
 logger = logging.getLogger(__name__)
 
@@ -125,12 +126,15 @@ async def _build_inline_result(
         if tweet is None:
             return None
 
-        text = format_tweet_card(tweet, include_translation=bool(tweet.translated_text))
+        hashtags = ""
         if settings.enable_hashtags:
             hashtags = render_hashtags(build_hashtags("twitter", "post", tweet.username))
-            if hashtags:
-                text = f"{text}\n\n{hashtags}"
-        text = _prepend_sender_quote(text, user, comment, settings)
+        text = format_tweet_card(tweet, include_translation=has_tweet_translation(tweet))
+        footer = format_tweet_footer(tweet, hashtags)
+        if footer:
+            text = f"{text}\n\n{footer}"
+        sender_quote = format_sender_quote(user, comment, settings.sender_quote_mode) if settings.include_sender_quote else ""
+        text = f"{sender_quote}\n\n{text}" if sender_quote else text
         preview_url = _tweet_preview_url(tweet)
         title = f"{tweet.display_name} (@{tweet.username})"
         description = _plain_description(tweet.text)
@@ -146,6 +150,9 @@ async def _build_inline_result(
             preview_url,
             keyboard,
             settings,
+            sender_quote=sender_quote,
+            hashtags=hashtags,
+            staging_chat_id=user.id,
         )
         if rich_result is not None:
             return rich_result
@@ -190,6 +197,8 @@ async def _fetch_tweet(url: str, language: str | None):
         html_tweet = parse_tweet_html(html, normalized_url) if html else None
         if html_tweet is not None:
             tweet = html_tweet
+    if tweet is not None:
+        await hydrate_reference_translations(tweet, language)
     return tweet
 
 
@@ -320,11 +329,19 @@ async def _build_rich_twitter_result(
     preview_url: str | None,
     keyboard: InlineKeyboardMarkup | None,
     settings: EffectiveSettings,
+    sender_quote: str = "",
+    hashtags: str = "",
+    staging_chat_id: int | None = None,
 ) -> BuiltInlineResult | None:
-    if database is None:
-        return None
-
-    rich = await build_twitter_rich_message(update.get_bot(), database, tweet, text)
+    rich = await build_twitter_rich_message(
+        update.get_bot(),
+        database,
+        tweet,
+        sender_quote=sender_quote,
+        hashtags=hashtags,
+        inline=True,
+        staging_chat_id=staging_chat_id,
+    )
     if rich is None:
         return None
 

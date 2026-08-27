@@ -13,7 +13,7 @@ Dropwire is one Telegram bot that turns social links into compact media cards.
 
 Every card can include source, media type and author hashtags. A comment before the first link is rendered as a sender quote. Multiple supported links in one message are handled in order.
 
-Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated result. Twitter/X uses Telegram Rich Messages for text above media, native multi-photo collages, quoted/replied-to post media and the original-link button in one message. GIF posts use native Telegram animation playback. Telegram does not expose the destination chat ID to inline bots, so inline results use Dropwire's compact private-chat defaults; group-specific settings cannot apply.
+Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated result. Twitter/X uses Telegram Rich Messages for structured text, native multi-photo collages, quoted/replied-to post media and the original-link button in one message. GIF posts use native Telegram animation playback. Telegram does not expose the destination chat ID to inline bots, so inline results use Dropwire's compact private-chat defaults; group-specific settings cannot apply.
 
 ## Telegram UX
 
@@ -56,17 +56,11 @@ docker compose ps
 
 Enable inline mode once in `@BotFather`: run `/setinline`, select `@dropwire_bot`, and set a placeholder such as `Вставьте ссылку из Twitter, YouTube, Spotify или SoundCloud`.
 
-### Inline media cache
+### Inline Twitter media
 
-Rich inline messages can reuse only media already uploaded to Telegram. To enable Twitter collages:
+Rich inline messages can reuse only media already uploaded to Telegram. Dropwire obtains the required `file_id` without a technical channel: on the first inline request for a media file, the bot silently stages it in the requester's DM, immediately deletes the staging message, and stores only the reusable identifier and technical dimensions in SQLite.
 
-1. Create a private Telegram channel, for example `Dropwire Cache`.
-2. Add the bot as an administrator with permission to post messages.
-3. Open the bot DM as a user listed in `BOT_ADMIN_IDS`.
-4. Open `Settings` → `Global` → `Inline media cache` → `Bind channel`.
-5. Forward any post from the private channel to the bot.
-
-The channel stores media messages and SQLite stores their `file_id` values. If the channel is not configured or Telegram rejects a cached file, Dropwire automatically uses its compact inline fallback.
+The requester must have opened the bot and pressed `/start` at least once. If Telegram does not allow the bot to write to that DM or rejects a media file, Dropwire automatically returns its compact inline fallback. Ordinary private and group cards upload trusted Twitter media URLs directly and do not use staging.
 
 The web service is exposed on `http://localhost:8080` by default. YouTube browser links stay disabled until `WEB_BASE_URL` is a public HTTPS address that reaches this service.
 
