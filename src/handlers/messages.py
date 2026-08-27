@@ -4,9 +4,9 @@ import logging
 from typing import Optional
 
 from aiogram.enums import ParseMode
-from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
+from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, ReplyParameters
 
-from src.telegram_runtime import ContextTypes, NetworkError, TelegramError, TimedOut, Update
+from src.telegram_runtime import BadRequest, ContextTypes, NetworkError, TelegramError, TimedOut, Update
 from src.telegram_ui import InlineKeyboardButton, InlineKeyboardMarkup
 from src.config import config
 from src.providers.link_router import LinkMatch, find_supported_links
@@ -15,6 +15,7 @@ from src.providers.spotify import fetch_spotify_card
 from src.providers.soundcloud import fetch_soundcloud_card
 from src.rendering.hashtags import build_hashtags, render_hashtags
 from src.rendering.telegram_cards import build_card_keyboard, format_card_text
+from src.rendering.twitter_rich import build_twitter_rich_message
 from src.twitter.normalize import normalize_url, extract_tweet_id, extract_username
 from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html
 from src.twitter.parser import parse_tweet_html
@@ -119,6 +120,42 @@ async def _record_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         logger.exception("Не удалось сохранить журнал доставки chat_id=%s", chat.id)
 
 
+async def _try_send_rich_tweet_card(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    tweet,
+    card_text: str,
+    thread_id: int | None,
+    settings: EffectiveSettings | None,
+):
+    database = context.application.bot_data.get("database")
+    if not isinstance(database, Database) or update.effective_chat is None:
+        return None
+
+    rich = await build_twitter_rich_message(context.bot, database, tweet, card_text)
+    if rich is None:
+        return None
+
+    reply_to_message_id = get_reply_to_message_id(update, settings)
+    reply_parameters = ReplyParameters(message_id=reply_to_message_id) if reply_to_message_id else None
+    try:
+        sent = await context.bot.send_rich_message(
+            chat_id=update.effective_chat.id,
+            rich_message=rich.message,
+            message_thread_id=thread_id,
+            reply_parameters=reply_parameters,
+            reply_markup=get_tweet_url_keyboard(tweet.url),
+            **telegram_timeout_kwargs(),
+        )
+    except BadRequest as exc:
+        logger.info("Telegram отклонил Rich Message, используется media fallback: %s", exc)
+        await database.delete_cached_media(list(rich.cache_urls))
+        return None
+
+    await _record_delivery(update, context, sent)
+    return sent
+
+
 def should_reply_in_chat(update: Update, settings: EffectiveSettings) -> bool:
     """Определяет, нужно ли отвечать в этом чате"""
     message = update.message
@@ -198,6 +235,17 @@ async def send_tweet_card(
                 settings=settings,
             )
             await _record_delivery(update, context, sent)
+            return
+
+        rich_sent = await _try_send_rich_tweet_card(
+            update,
+            context,
+            tweet,
+            card_text,
+            thread_id,
+            settings,
+        )
+        if rich_sent is not None:
             return
 
         # Скачиваем медиа

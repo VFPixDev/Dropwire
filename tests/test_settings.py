@@ -14,14 +14,17 @@ from src.services.settings import (
 from src.services.providers import is_provider_enabled, toggle_provider
 
 
-def test_effective_settings_inherit_global_and_allow_group_override(tmp_path):
+def test_group_settings_override_global_while_private_defaults_are_fixed(tmp_path):
     async def run():
         database = Database(str(tmp_path / "dropwire.sqlite3"))
         await database.connect()
         await database.init_schema()
         try:
-            await database.set_setting("global", GLOBAL_OWNER_ID, "enable_hashtags", "0")
-            await database.set_setting("group", -100, "enable_hashtags", "1")
+            await database.set_setting("global", GLOBAL_OWNER_ID, "enable_hashtags", "1")
+            await database.set_setting("global", GLOBAL_OWNER_ID, "caption_above_media", "0")
+            await database.set_setting("global", GLOBAL_OWNER_ID, "reply_to_message", "1")
+            await database.set_setting("global", GLOBAL_OWNER_ID, "include_sender_quote", "1")
+            await database.set_setting("group", -100, "enable_hashtags", "0")
 
             group_update = SimpleNamespace(
                 effective_chat=SimpleNamespace(id=-100, type="supergroup"),
@@ -35,8 +38,11 @@ def test_effective_settings_inherit_global_and_allow_group_override(tmp_path):
             group_settings = await get_effective_settings(database, group_update)
             dm_settings = await get_effective_settings(database, dm_update)
 
-            assert group_settings.enable_hashtags is True
+            assert group_settings.enable_hashtags is False
             assert dm_settings.enable_hashtags is False
+            assert dm_settings.caption_above_media is True
+            assert dm_settings.reply_to_message is False
+            assert dm_settings.include_sender_quote is False
         finally:
             await database.close()
 

@@ -14,7 +14,7 @@ from aiogram.utils.token import TokenValidationError
 from src.config import config
 from src.handlers.callbacks import handle_callback_query
 from src.handlers.chat_members import handle_my_chat_member
-from src.handlers.commands import admin_panel, downloads, help_command, settings, start, status
+from src.handlers.commands import admin_panel, downloads, help_command, settings, start
 from src.handlers.inline import handle_inline_query
 from src.handlers.delete import delete_card
 from src.handlers.messages import handle_message
@@ -99,7 +99,6 @@ async def post_init(bot: BotAdapter, application: ApplicationState) -> None:
                 BotCommand(command="settings", description="Настройки"),
                 BotCommand(command="downloads", description="Мои загрузки"),
                 BotCommand(command="help", description="Справка"),
-                BotCommand(command="status", description="Состояние бота"),
                 BotCommand(command="del", description="Удалить карточку ответом в группе"),
             ]
         )
@@ -150,9 +149,6 @@ def build_dispatcher(bot: BotAdapter, application: ApplicationState) -> Dispatch
 
     async def on_admin(message: Message) -> None:
         await admin_panel(message_update(message, bot), context())
-
-    async def on_status(message: Message) -> None:
-        await status(message_update(message, bot), context())
 
     async def on_delete(message: Message) -> None:
         await delete_card(message, bot, application)
@@ -221,7 +217,6 @@ def build_dispatcher(bot: BotAdapter, application: ApplicationState) -> Dispatch
     dispatcher.message.register(on_settings, Command("settings"))
     dispatcher.message.register(on_downloads, Command("downloads"))
     dispatcher.message.register(on_admin, Command("admin"))
-    dispatcher.message.register(on_status, Command("status"))
     dispatcher.message.register(on_delete, Command("del"))
     dispatcher.message.register(on_cache_binding, is_pending_cache_binding)
     dispatcher.callback_query.register(on_callback)

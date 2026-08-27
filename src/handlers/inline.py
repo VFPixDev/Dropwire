@@ -14,12 +14,7 @@ from aiogram.types import (
     InlineQueryResultMpeg4Gif,
     InlineQueryResultPhoto,
     InlineQueryResultVideo,
-    InputMediaAnimation,
-    InputMediaPhoto,
-    InputMediaVideo,
-    InputRichMessage,
     InputRichMessageContent,
-    InputRichMessageMedia,
     InputTextMessageContent,
     User,
 )
@@ -37,8 +32,8 @@ from src.providers.spotify import fetch_spotify_card
 from src.providers.youtube import fetch_youtube_card
 from src.rendering.hashtags import build_hashtags, render_hashtags
 from src.rendering.telegram_cards import format_card_text
+from src.rendering.twitter_rich import build_twitter_rich_message
 from src.services.database import Database
-from src.services.media_cache import CachedMedia, cache_tweet_media
 from src.services.providers import is_provider_enabled
 from src.services.settings import EffectiveSettings, get_effective_settings, get_translation_language, is_user_allowed
 from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html, get_trusted_twitter_mp4_url
@@ -329,43 +324,9 @@ async def _build_rich_twitter_result(
     if database is None:
         return None
 
-    group_specs: list[tuple[str | None, list]] = []
-    if tweet.media:
-        group_specs.append((None, tweet.media))
-    if tweet.quoted_tweet and tweet.quoted_tweet.media:
-        group_specs.append(("Медиа цитируемого поста", tweet.quoted_tweet.media))
-    if tweet.parent_tweet and tweet.parent_tweet.media:
-        group_specs.append(("Медиа исходного поста", tweet.parent_tweet.media))
-    if not group_specs:
+    rich = await build_twitter_rich_message(update.get_bot(), database, tweet, text)
+    if rich is None:
         return None
-
-    all_items = [item for _, items in group_specs for item in items]
-    all_cached = await cache_tweet_media(update.get_bot(), database, all_items)
-    if len(all_cached) != len(all_items):
-        return None
-    cached_groups: list[tuple[str | None, list[CachedMedia]]] = []
-    offset = 0
-    for label, items in group_specs:
-        cached_groups.append((label, all_cached[offset : offset + len(items)]))
-        offset += len(items)
-
-    attachments: list[InputRichMessageMedia] = []
-    html_parts = [_rich_text_html(text)]
-    media_index = 0
-    for label, cached_items in cached_groups:
-        refs: list[str] = []
-        for cached in cached_items:
-            media_id = f"m{media_index}"
-            media_index += 1
-            attachments.append(InputRichMessageMedia(id=media_id, media=_cached_input_media(cached)))
-            source = f"tg://{_rich_media_scheme(cached.media_type)}?id={media_id}"
-            refs.append(f'<img src="{source}"/>' if cached.media_type == "photo" else f'<video src="{source}"></video>')
-
-        media_html = refs[0] if len(refs) == 1 else f"<tg-collage>{''.join(refs)}</tg-collage>"
-        if label:
-            html_parts.append(f"<blockquote><b>{label}</b>{media_html}</blockquote>")
-        else:
-            html_parts.append(media_html)
 
     safe_title = _single_line(title, 120) or _source_title(link.source)
     safe_description = _single_line(description, 180)
@@ -377,43 +338,15 @@ async def _build_rich_twitter_result(
         description=safe_description,
         thumbnail_url=preview_url,
         input_message_content=InputRichMessageContent(
-            rich_message=InputRichMessage(html="".join(html_parts), media=attachments)
+            rich_message=rich.message
         ),
         reply_markup=keyboard,
     )
     return BuiltInlineResult(
         primary=article,
         fallback=fallback,
-        cache_urls=tuple(item.url for item in all_items),
+        cache_urls=rich.cache_urls,
     )
-
-
-def _cached_input_media(cached: CachedMedia):
-    if cached.media_type == "photo":
-        return InputMediaPhoto(media=cached.file_id)
-    if cached.media_type == "animation":
-        return InputMediaAnimation(
-            media=cached.file_id,
-            width=cached.width,
-            height=cached.height,
-            duration=cached.duration,
-        )
-    return InputMediaVideo(
-        media=cached.file_id,
-        width=cached.width,
-        height=cached.height,
-        duration=cached.duration,
-        supports_streaming=True,
-    )
-
-
-def _rich_media_scheme(media_type: str) -> str:
-    # Rich HTML represents silent MPEG-4 animations through the video scheme.
-    return "photo" if media_type == "photo" else "video"
-
-
-def _rich_text_html(text: str) -> str:
-    return text.replace("\n", "<br>")
 
 
 def _fit_message_text(text: str, title: str, original_url: str) -> str:

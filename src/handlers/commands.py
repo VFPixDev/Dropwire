@@ -21,7 +21,7 @@ from src.handlers.menus import (
 )
 from src.services.database import Database
 from src.services.menu_data import build_download_menu_data, build_provider_states
-from src.services.settings import is_admin, is_user_allowed, remember_group
+from src.services.settings import is_admin, is_user_allowed
 from src.providers.youtube_urls import VIDEO_ID_RE
 
 logger = logging.getLogger(__name__)
@@ -73,36 +73,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     ),
                 )
     logger.info("Команда /start от пользователя %s", update.effective_user.id)
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /status - показывает настройки и статус."""
-    if update.message is None or update.effective_user is None:
-        logger.warning("Команда /status без message/effective_user")
-        return
-    if not await _ensure_command_allowed(update):
-        return
-
-    user_id = update.effective_user.id
-    private = update.effective_chat is not None and update.effective_chat.type == "private"
-
-    database = context.application.bot_data.get("database")
-    if isinstance(database, Database):
-        await remember_group(database, update)
-
-    if private and is_admin(user_id) and isinstance(database, Database):
-        states = await build_provider_states(database)
-        stats = await database.get_runtime_stats()
-        text = get_admin_text(stats, states)
-        keyboard = get_admin_keyboard(states)
-    else:
-        text = get_settings_hub_text(private, is_admin(user_id))
-        keyboard = get_settings_hub_keyboard(private, is_admin(user_id))
-
-    await update.message.reply_text(
-        text=text, parse_mode=ParseMode.HTML, reply_markup=keyboard, disable_web_page_preview=True
-    )
-    logger.info("Команда /status от пользователя %s", user_id)
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -13,7 +13,7 @@ Dropwire is one Telegram bot that turns social links into compact media cards.
 
 Every card can include source, media type and author hashtags. A comment before the first link is rendered as a sender quote. Multiple supported links in one message are handled in order.
 
-Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated result. Twitter/X uses Telegram Rich Messages for text above media, native multi-photo collages, quoted/replied-to post media and the original-link button in one message. GIF posts use native Telegram animation playback. Telegram does not expose the destination chat ID to inline bots, so inline results use the sender's DM settings over global defaults; group-specific settings cannot apply.
+Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated result. Twitter/X uses Telegram Rich Messages for text above media, native multi-photo collages, quoted/replied-to post media and the original-link button in one message. GIF posts use native Telegram animation playback. Telegram does not expose the destination chat ID to inline bots, so inline results use Dropwire's compact private-chat defaults; group-specific settings cannot apply.
 
 ## Telegram UX
 
@@ -21,7 +21,6 @@ Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <li
 - `/settings` - settings for the current context.
 - `/downloads` - recent files that are still retained.
 - `/help` - supported links and usage.
-- `/status` - runtime status for the owner, settings for other users.
 - `/admin` - owner-only provider controls and runtime counters.
 - `/del` - in a group, reply to a Dropwire card to remove it. The original link sender and group administrators are allowed.
 
@@ -29,9 +28,9 @@ Settings are deliberately separated by scope:
 
 - Global settings are available only to users listed in `BOT_ADMIN_IDS`.
 - Group settings are edited in DM by the user who added the bot or a current Telegram group administrator.
-- DM settings affect only that user's private chat.
+- Private chats and inline results use fixed compact defaults: caption above media, no hashtags, sender quote or reply.
 - Inside a group, users can configure their own translation; group translation requires group admin rights.
-- DM and group profiles can be reset to inherited global values.
+- Group profiles can be reset to inherited global values.
 
 ## Quick Start
 

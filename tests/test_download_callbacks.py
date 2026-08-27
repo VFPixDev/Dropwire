@@ -80,7 +80,7 @@ def test_group_management_rejects_linked_user_after_leaving(tmp_path):
     asyncio.run(run())
 
 
-def test_dm_settings_cannot_target_another_user(tmp_path):
+def test_private_presentation_settings_are_not_writable(tmp_path):
     async def run():
         database = Database(str(tmp_path / "dropwire.sqlite3"))
         await database.connect()
@@ -97,7 +97,7 @@ def test_dm_settings_cannot_target_another_user(tmp_path):
             context = SimpleNamespace(bot=FakeBot({}))
             allowed = await _ensure_scope_write_allowed(Query(), context, database, 42, "dm", 7)
             assert allowed is False
-            assert "только себе" in answers[-1][0]
+            assert "Неизвестный раздел" in answers[-1][0]
         finally:
             await database.close()
 

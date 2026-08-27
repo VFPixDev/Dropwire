@@ -44,7 +44,6 @@ CALLBACK_ADMIN = "admin"
 CB_ADMIN_PROVIDER = "admin:provider:"
 
 CB_SETTINGS_GLOBAL = "st:global"
-CB_SETTINGS_DM = "st:dm"
 CB_SETTINGS_GROUPS = "st:groups"
 CB_SETTINGS_GROUP = "st:group:"
 CB_SETTINGS_TOGGLE = "st:tog:"
@@ -65,10 +64,7 @@ def get_main_menu_text() -> str:
 
 Отправьте ссылку из Twitter/X, YouTube, Spotify или SoundCloud, и я оформлю ее в удобную карточку.
 
-Настройки разделены на:
-• Глобальные
-• Групповые
-• Личные
+Настройки групп и перевод доступны в меню.
 
 Выберите действие:"""
 
@@ -101,19 +97,18 @@ def get_help_text() -> str:
 
 <b>Inline-режим:</b>
 Введите в любом чате <code>@dropwire_bot ссылка</code>, выберите результат, и карточка появится в этом чате.
-Применяются личные и глобальные настройки; настройки конкретной группы Telegram не передаёт.
+Inline-карточки используют стандартное компактное оформление; настройки конкретной группы Telegram не передаёт.
 
 <b>Настройки:</b>
-• Глобальные — базовое поведение всего бота
 • Групповые — выбираются и меняются только в ЛС с ботом
-• Личные — применяются в ЛС
-• В группе можно менять только перевод: для себя или для группы
+• Перевод — персональный или общий для группы
+• Глобальные параметры доступны только администратору бота
 
 <b>Команды:</b>
 /start — главное меню
 /settings — настройки
 /downloads — доступные загрузки
-/status — состояние бота"""
+/del — удалить карточку ответом в группе"""
 
 
 def get_help_keyboard() -> InlineKeyboardMarkup:
@@ -122,12 +117,11 @@ def get_help_keyboard() -> InlineKeyboardMarkup:
 
 def get_settings_hub_text(is_private: bool, is_admin: bool) -> str:
     if is_private:
-        global_line = "✅ доступно" if is_admin else "🔒 только админ"
+        admin_line = "\n<b>Глобальные:</b> доступны администратору бота" if is_admin else ""
         return f"""<b>⚙️ Настройки {config.APP_NAME}</b>
 
-<b>Глобальные:</b> {global_line}
 <b>Групповые:</b> выбираются здесь, в ЛС
-<b>Личные:</b> только для этого чата с ботом
+<b>Перевод:</b> для вас или выбранной группы{admin_line}
 
 Выберите раздел:"""
 
@@ -146,7 +140,6 @@ def get_settings_hub_keyboard(is_private: bool, is_admin: bool, has_group: bool 
     rows = []
     if is_admin:
         rows.append([InlineKeyboardButton("🌍 Глобальные", callback_data=CB_SETTINGS_GLOBAL)])
-    rows.append([InlineKeyboardButton("👤 ЛС", callback_data=CB_SETTINGS_DM)])
     rows.append([InlineKeyboardButton("👥 Группы", callback_data=CB_SETTINGS_GROUPS)])
     rows.append([InlineKeyboardButton("🌐 Перевод", callback_data=CALLBACK_TRANSLATE)])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=CALLBACK_MAIN_MENU)])
@@ -186,8 +179,8 @@ def get_scope_settings_keyboard(scope: str, owner_id: int) -> InlineKeyboardMark
     rows.append([InlineKeyboardButton("Отправитель в цитате", callback_data=f"{CB_SETTINGS_SENDER}{scope}:{owner_id}")])
     rows.append([InlineKeyboardButton("🌐 Перевод", callback_data=f"{CB_TRANSLATE_SET}{scope}:{owner_id}:menu")])
     if scope == "global":
-        rows.append([InlineKeyboardButton("🗄 Медиакэш inline", callback_data=CB_INLINE_CACHE)])
-    if scope in {"dm", "group"}:
+        rows.append([InlineKeyboardButton("🗄 Медиакэш Twitter", callback_data=CB_INLINE_CACHE)])
+    if scope == "group":
         rows.append(
             [InlineKeyboardButton("↩️ Сбросить к глобальным", callback_data=f"{CB_SETTINGS_RESET}{scope}:{owner_id}")]
         )
@@ -198,16 +191,16 @@ def get_scope_settings_keyboard(scope: str, owner_id: int) -> InlineKeyboardMark
 def get_inline_cache_text(cache_chat_id: int | None, pending: bool = False) -> str:
     if pending:
         return (
-            "<b>🗄 Медиакэш inline</b>\n\n"
+            "<b>🗄 Медиакэш Twitter</b>\n\n"
             "Перешлите сюда любой пост из закрытого канала-кэша. "
             "Бот должен быть администратором этого канала с правом публикации."
         )
     state = f"✅ подключён: <code>{cache_chat_id}</code>" if cache_chat_id else "❌ не подключён"
     return (
-        "<b>🗄 Медиакэш inline</b>\n\n"
+        "<b>🗄 Медиакэш Twitter</b>\n\n"
         f"Состояние: {state}\n\n"
         "Канал используется только для хранения Telegram file_id, необходимых "
-        "для коллажей и вложенного медиа в inline-режиме."
+        "для Rich-карточек Twitter в inline-режиме, ЛС и группах."
     )
 
 
@@ -314,7 +307,7 @@ def _scope_callback(scope: str, owner_id: int) -> str:
     if scope == "global":
         return CB_SETTINGS_GLOBAL
     if scope == "dm":
-        return CB_SETTINGS_DM
+        return CALLBACK_TRANSLATE
     if scope == "group":
         return f"{CB_SETTINGS_GROUP}{owner_id}"
     return CALLBACK_SETTINGS
