@@ -1,11 +1,13 @@
 import asyncio
+from types import SimpleNamespace
 
-from telegram import InlineQuery, Update, User
+from aiogram.types import User
 
 from scripts.smoke_providers import SOUNDCLOUD_URL, SPOTIFY_URL, TWITTER_URL, YOUTUBE_URL
 from src.handlers.inline import _build_inline_result
 from src.providers.link_router import find_supported_links
 from src.services.settings import EffectiveSettings
+from src.telegram_runtime import Update
 
 
 def _settings() -> EffectiveSettings:
@@ -25,14 +27,13 @@ async def main() -> int:
     failures = 0
     for index, url in enumerate((TWITTER_URL, YOUTUBE_URL, SPOTIFY_URL, SOUNDCLOUD_URL), start=1):
         link = find_supported_links(url)[0]
-        inline_query = InlineQuery(id=str(index), from_user=user, query=url, offset="")
-        update = Update(update_id=index, inline_query=inline_query)
+        update = Update(update_id=index, bot=SimpleNamespace())
         try:
             result = await _build_inline_result(update, None, link, _settings(), user, None)
             if result is None:
                 raise RuntimeError("empty inline result")
-            result.primary.to_dict()
-            result.fallback.to_dict()
+            result.primary.model_dump(exclude_none=True)
+            result.fallback.model_dump(exclude_none=True)
             print(f"inline {link.source}: ok ({type(result.primary).__name__})")
         except Exception as exc:
             failures += 1

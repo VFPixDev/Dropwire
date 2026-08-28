@@ -1,85 +1,107 @@
+import asyncio
+import contextlib
 import logging
-from telegram import BotCommand, Update
-from telegram.error import InvalidToken, NetworkError, TimedOut
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    ChatMemberHandler,
-    CommandHandler,
-    ContextTypes,
-    InlineQueryHandler,
-    MessageHandler,
-    filters,
-)
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.filters import Command
+from aiogram import BaseMiddleware
+from aiogram.types import BotCommand, CallbackQuery, ChatMemberUpdated, ErrorEvent, InlineQuery, Message
+from aiogram.utils.token import TokenValidationError
+
 from src.config import config
-from src.handlers.commands import admin_panel, downloads, help_command, settings, start, status
 from src.handlers.callbacks import handle_callback_query
 from src.handlers.chat_members import handle_my_chat_member
-from src.handlers.messages import handle_message
+from src.handlers.commands import admin_panel, downloads, help_command, settings, start
 from src.handlers.inline import handle_inline_query
+from src.handlers.delete import delete_card
+from src.handlers.messages import handle_message
 from src.media.cleanup import cleanup_temp_files
 from src.services.database import Database
 from src.services.download_queue import DownloadQueue
 from src.services.youtube_downloader import YtDlpDownloader
+from src.telegram_runtime import (
+    ApplicationState,
+    BotAdapter,
+    HandlerContext,
+    callback_update,
+    inline_update,
+    member_update,
+    message_update,
+)
 from src.utils.rate_limit import rate_limiter
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=getattr(logging, config.LOG_LEVEL)
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=getattr(logging, config.LOG_LEVEL),
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-async def cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Периодическая очистка временных файлов и rate limiter"""
+class ConcurrentUpdateLimitMiddleware(BaseMiddleware):
+    def __init__(self, limit: int) -> None:
+        self.limit = max(1, limit)
+        self._semaphore = asyncio.Semaphore(self.limit)
+
+    async def __call__(self, handler, event, data):
+        async with self._semaphore:
+            return await handler(event, data)
+
+
+async def cleanup_job(context: HandlerContext) -> None:
+    """Periodically clean temporary files and stale in-memory state."""
     logger.info("Запуск периодической очистки...")
     cleanup_temp_files(max_age_seconds=3600)
     rate_limiter.cleanup_old_entries(max_age=3600)
     downloader = context.application.bot_data.get("youtube_downloader")
     if isinstance(downloader, YtDlpDownloader):
         await downloader.cleanup_stale_files(config.DOWNLOAD_FILE_RETENTION_HOURS * 3600)
+    database = context.application.bot_data.get("database")
+    if isinstance(database, Database):
+        await database.prune_deliveries(max_age_hours=48)
     logger.info("Периодическая очистка завершена")
 
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log handler failures without leaking request data back to Telegram."""
-    if isinstance(context.error, (TimedOut, NetworkError)):
-        logger.warning("Сетевая ошибка Telegram без автоматического повтора: %s", context.error)
-        return
-    error = context.error
-    update_id = getattr(update, "update_id", None)
-    exc_info = (type(error), error, error.__traceback__) if isinstance(error, BaseException) else None
-    logger.error(
-        "Необработанная ошибка update_id=%s error_type=%s",
-        update_id,
-        type(error).__name__,
-        exc_info=exc_info,
-    )
+async def _cleanup_loop(context: HandlerContext) -> None:
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await cleanup_job(context)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ошибка периодической очистки")
+        await asyncio.sleep(3600)
 
 
-async def post_init(application: Application) -> None:
-    """Инициализация после запуска бота"""
+async def post_init(bot: BotAdapter, application: ApplicationState) -> None:
     database = Database(config.DATABASE_PATH)
     await database.connect()
     await database.init_schema()
     interrupted = await database.fail_interrupted_downloads()
     if interrupted:
         logger.warning("После перезапуска помечено неудачными загрузок: %s", interrupted)
+
     application.bot_data["database"] = database
     application.bot_data["download_queue"] = DownloadQueue(config.MAX_CONCURRENT_DOWNLOADS)
     application.bot_data["youtube_downloader"] = YtDlpDownloader(config.DOWNLOAD_DIR)
 
+    me = await bot.get_me()
+    bot.username = me.username
     try:
-        await application.bot.set_my_commands(
+        await bot.set_my_commands(
             [
-                BotCommand("start", "Главное меню"),
-                BotCommand("settings", "Настройки"),
-                BotCommand("downloads", "Мои загрузки"),
-                BotCommand("help", "Справка"),
-                BotCommand("status", "Состояние бота"),
+                BotCommand(command="start", description="Главное меню"),
+                BotCommand(command="settings", description="Настройки"),
+                BotCommand(command="downloads", description="Мои загрузки"),
+                BotCommand(command="help", description="Справка"),
+                BotCommand(command="del", description="Удалить карточку ответом в группе"),
             ]
         )
-    except NetworkError as exc:
+    except TelegramNetworkError as exc:
         logger.warning("Не удалось зарегистрировать команды Telegram: %s", exc)
 
     if not config.BOT_ADMIN_IDS:
@@ -92,65 +114,108 @@ async def post_init(application: Application) -> None:
     logger.info("%s запущен и готов к работе", config.APP_NAME)
 
 
-async def post_shutdown(application: Application) -> None:
-    """Закрытие ресурсов приложения."""
+async def post_shutdown(application: ApplicationState) -> None:
     database = application.bot_data.get("database")
     if isinstance(database, Database):
         await database.close()
 
 
-def build_application() -> Application:
-    return (
-        Application.builder()
-        .token(config.BOT_TOKEN)
-        .concurrent_updates(config.MAX_CONCURRENT_UPDATES)
-        .connect_timeout(config.TELEGRAM_CONNECT_TIMEOUT)
-        .read_timeout(config.TELEGRAM_READ_TIMEOUT)
-        .write_timeout(config.TELEGRAM_WRITE_TIMEOUT)
-        .pool_timeout(config.TELEGRAM_POOL_TIMEOUT)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
+def _command_args(message: Message) -> list[str]:
+    parts = (message.text or "").split(maxsplit=1)
+    return parts[1].split() if len(parts) > 1 else []
 
 
-def main():
-    """Запуск бота"""
-    application = build_application()
+def build_dispatcher(bot: BotAdapter, application: ApplicationState) -> Dispatcher:
+    dispatcher = Dispatcher()
+    concurrency = ConcurrentUpdateLimitMiddleware(config.MAX_CONCURRENT_UPDATES)
+    dispatcher.update.outer_middleware(concurrency)
+    dispatcher["max_concurrent_updates"] = concurrency.limit
 
-    # Команды
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("settings", settings))
-    application.add_handler(CommandHandler("downloads", downloads))
-    application.add_handler(CommandHandler("admin", admin_panel))
-    application.add_handler(CommandHandler("status", status))
+    def context(args: list[str] | None = None) -> HandlerContext:
+        return HandlerContext(bot=bot, application=application, args=args or [])
 
-    # Обработчик callback запросов от inline кнопок
-    application.add_handler(CallbackQueryHandler(handle_callback_query))
+    async def on_start(message: Message) -> None:
+        await start(message_update(message, bot), context(_command_args(message)))
 
-    # Inline mode: @dropwire_bot <link>. Provider requests must not pause polling.
-    application.add_handler(InlineQueryHandler(handle_inline_query, block=False))
+    async def on_help(message: Message) -> None:
+        await help_command(message_update(message, bot), context())
 
-    # Отслеживаем, кто добавил бота в группу, чтобы показывать пользователю только его группы.
-    application.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    async def on_settings(message: Message) -> None:
+        await settings(message_update(message, bot), context())
 
-    # Обработчик сообщений
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
+    async def on_downloads(message: Message) -> None:
+        await downloads(message_update(message, bot), context())
 
-    # Периодическая очистка (каждый час)
-    application.job_queue.run_repeating(cleanup_job, interval=3600, first=60)  # 1 час  # Первый запуск через минуту
+    async def on_admin(message: Message) -> None:
+        await admin_panel(message_update(message, bot), context())
 
-    # Запуск
+    async def on_delete(message: Message) -> None:
+        await delete_card(message, bot, application)
+
+    async def on_callback(query: CallbackQuery) -> None:
+        await handle_callback_query(callback_update(query, bot), context())
+
+    async def on_inline(query: InlineQuery) -> None:
+        await handle_inline_query(inline_update(query, bot), context())
+
+    async def on_member(event: ChatMemberUpdated) -> None:
+        await handle_my_chat_member(member_update(event, bot), context())
+
+    async def on_message(message: Message) -> None:
+        await handle_message(message_update(message, bot), context())
+
+    async def on_error(event: ErrorEvent) -> None:
+        error = event.exception
+        if isinstance(error, TelegramNetworkError):
+            logger.warning("Сетевая ошибка Telegram без автоматического повтора: %s", error)
+            return
+        logger.error(
+            "Необработанная ошибка update_id=%s error_type=%s",
+            event.update.update_id,
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    dispatcher.message.register(on_start, Command("start"))
+    dispatcher.message.register(on_help, Command("help"))
+    dispatcher.message.register(on_settings, Command("settings"))
+    dispatcher.message.register(on_downloads, Command("downloads"))
+    dispatcher.message.register(on_admin, Command("admin"))
+    dispatcher.message.register(on_delete, Command("del"))
+    dispatcher.callback_query.register(on_callback)
+    dispatcher.inline_query.register(on_inline)
+    dispatcher.my_chat_member.register(on_member)
+    dispatcher.message.register(on_message, F.text & ~F.text.startswith("/"))
+    dispatcher.errors.register(on_error)
+    return dispatcher
+
+
+async def run() -> None:
+    raw_bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = BotAdapter(raw_bot)
+    application = ApplicationState()
+    cleanup_task: asyncio.Task | None = None
+
     try:
-        if config.MODE == "polling":
-            logger.info("Запуск в режиме polling")
-            application.run_polling(allowed_updates=Update.ALL_TYPES)
-        else:
-            logger.warning("Webhook режим пока не реализован, используется polling")
-            application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except InvalidToken as exc:
+        await post_init(bot, application)
+        dispatcher = build_dispatcher(bot, application)
+        handler_context = HandlerContext(bot=bot, application=application)
+        cleanup_task = asyncio.create_task(_cleanup_loop(handler_context), name="dropwire-cleanup")
+        logger.info("Запуск в режиме polling")
+        await dispatcher.start_polling(raw_bot, allowed_updates=dispatcher.resolve_used_update_types())
+    finally:
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cleanup_task
+        await post_shutdown(application)
+        await raw_bot.session.close()
+
+
+def main() -> None:
+    try:
+        asyncio.run(run())
+    except (TokenValidationError, TelegramUnauthorizedError) as exc:
         logger.error("BOT_TOKEN отклонен Telegram. Проверьте .env или перевыпустите токен через BotFather.")
         raise SystemExit(1) from exc
 

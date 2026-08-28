@@ -80,13 +80,6 @@ def _parse_fx_base_url() -> str:
     return raw_url
 
 
-def _parse_sender_quote_mode() -> str:
-    mode = os.getenv("SENDER_QUOTE_MODE", "name").strip().lower()
-    if mode not in {"name", "username", "mention"}:
-        raise ValueError("SENDER_QUOTE_MODE должен быть name, username или mention")
-    return mode
-
-
 def _parse_web_base_url() -> str:
     raw_url = os.getenv("WEB_BASE_URL", "").strip().rstrip("/")
     if not raw_url:
@@ -115,7 +108,6 @@ class Config:
     COMPRESS_MEDIA: bool = True
     MAX_MEDIA_MB: int = 20
     FX_BASE_URL: str = "https://fxtwitter.com"
-    INCLUDE_QUOTED_MEDIA: bool = False
     LOG_LEVEL: str = "INFO"
     RATE_LIMIT_SECONDS: int = 5
     RATE_LIMIT_CHAT_SECONDS: int = 3
@@ -174,26 +166,20 @@ class Config:
             MODE=mode,
             TELEGRAM_USER_IDS=allowed_user_ids,
             BOT_ADMIN_IDS=admin_user_ids or allowed_user_ids or [],
-            REPLY_IN_GROUPS=_parse_bool("REPLY_IN_GROUPS"),
-            REMOVE_MESSAGE_IN_GROUPS=_parse_bool("REMOVE_MESSAGE_IN_GROUPS"),
             COMPRESS_MEDIA=_parse_bool("COMPRESS_MEDIA", "1"),
             MAX_MEDIA_MB=_parse_int("MAX_MEDIA_MB", 20, min_value=1),
             FX_BASE_URL=_parse_fx_base_url(),
-            INCLUDE_QUOTED_MEDIA=_parse_bool("INCLUDE_QUOTED_MEDIA"),
             LOG_LEVEL=os.getenv("LOG_LEVEL", "INFO").upper(),
             RATE_LIMIT_SECONDS=_parse_int("RATE_LIMIT_SECONDS", 5, min_value=0),
             RATE_LIMIT_CHAT_SECONDS=_parse_int("RATE_LIMIT_CHAT_SECONDS", 3, min_value=0),
             RATE_LIMIT_CHAT_BURST=_parse_int("RATE_LIMIT_CHAT_BURST", 5, min_value=1),
             MAX_CONCURRENT_UPDATES=_parse_int("MAX_CONCURRENT_UPDATES", 8, min_value=1),
-            REPLY_TO_MESSAGE=_parse_bool("REPLY_TO_MESSAGE", "1"),
-            CAPTION_ABOVE_MEDIA=_parse_bool("CAPTION_ABOVE_MEDIA", "1"),
             DUMP_TWEET_HTML=_parse_bool("DUMP_TWEET_HTML"),
             RETRY_MAX_ATTEMPTS=_parse_int("RETRY_MAX_ATTEMPTS", 3, min_value=1),
             RETRY_WAIT_MIN=_parse_float("RETRY_WAIT_MIN", 0.5, min_value=0),
             RETRY_WAIT_MAX=_parse_float("RETRY_WAIT_MAX", 4.0, min_value=0),
             RETRY_WAIT_MULTIPLIER=_parse_float("RETRY_WAIT_MULTIPLIER", 0.5, min_value=0),
             RETRY_STATUS_CODES=_parse_retry_status_codes(),
-            ENABLE_HASHTAGS=_parse_bool("ENABLE_HASHTAGS", "1"),
             YOUTUBE_API_KEY=os.getenv("YOUTUBE_API_KEY", "").strip(),
             SPOTIFY_CLIENT_ID=os.getenv("SPOTIFY_CLIENT_ID", "").strip(),
             SPOTIFY_CLIENT_SECRET=os.getenv("SPOTIFY_CLIENT_SECRET", "").strip(),
@@ -213,8 +199,6 @@ class Config:
             TELEGRAM_READ_TIMEOUT=_parse_float("TELEGRAM_READ_TIMEOUT", 30.0, min_value=1.0),
             TELEGRAM_WRITE_TIMEOUT=_parse_float("TELEGRAM_WRITE_TIMEOUT", 60.0, min_value=1.0),
             TELEGRAM_POOL_TIMEOUT=_parse_float("TELEGRAM_POOL_TIMEOUT", 15.0, min_value=1.0),
-            INCLUDE_SENDER_QUOTE=_parse_bool("INCLUDE_SENDER_QUOTE", "1"),
-            SENDER_QUOTE_MODE=_parse_sender_quote_mode(),
         )
 
 

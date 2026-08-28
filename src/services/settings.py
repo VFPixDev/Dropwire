@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from telegram import Update
+from src.telegram_runtime import Update
 
 from src.config import config
 from src.services.database import Database
@@ -22,10 +22,10 @@ BOOLEAN_SETTINGS = {
 SETTING_SCOPES = {
     "reply_in_groups": {"global", "group"},
     "remove_message_in_groups": {"global", "group"},
-    "reply_to_message": {"global", "group", "dm"},
-    "caption_above_media": {"global", "group", "dm"},
-    "enable_hashtags": {"global", "group", "dm"},
-    "include_sender_quote": {"global", "group", "dm"},
+    "reply_to_message": {"global", "group"},
+    "caption_above_media": {"global", "group"},
+    "enable_hashtags": {"global", "group"},
+    "include_sender_quote": {"global", "group"},
 }
 
 SENDER_QUOTE_MODES = {
@@ -44,6 +44,17 @@ class EffectiveSettings:
     enable_hashtags: bool
     include_sender_quote: bool
     sender_quote_mode: str
+
+
+PRIVATE_SETTINGS = EffectiveSettings(
+    reply_in_groups=False,
+    remove_message_in_groups=False,
+    reply_to_message=False,
+    caption_above_media=True,
+    enable_hashtags=False,
+    include_sender_quote=False,
+    sender_quote_mode="name",
+)
 
 
 def bool_to_db(value: bool) -> str:
@@ -70,6 +81,8 @@ def is_setting_allowed_for_scope(name: str, scope: str) -> bool:
 
 async def get_effective_settings(database: Database | None, update: Update) -> EffectiveSettings:
     scope, owner_id = _scope_for_update(update)
+    if scope == "dm":
+        return PRIVATE_SETTINGS
     values = await _merged_settings(database, scope, owner_id)
     return EffectiveSettings(
         reply_in_groups=db_to_bool(values.get("reply_in_groups"), config.REPLY_IN_GROUPS),

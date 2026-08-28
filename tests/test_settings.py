@@ -14,14 +14,17 @@ from src.services.settings import (
 from src.services.providers import is_provider_enabled, toggle_provider
 
 
-def test_effective_settings_inherit_global_and_allow_group_override(tmp_path):
+def test_group_settings_override_global_while_private_defaults_are_fixed(tmp_path):
     async def run():
         database = Database(str(tmp_path / "dropwire.sqlite3"))
         await database.connect()
         await database.init_schema()
         try:
-            await database.set_setting("global", GLOBAL_OWNER_ID, "enable_hashtags", "0")
-            await database.set_setting("group", -100, "enable_hashtags", "1")
+            await database.set_setting("global", GLOBAL_OWNER_ID, "enable_hashtags", "1")
+            await database.set_setting("global", GLOBAL_OWNER_ID, "caption_above_media", "0")
+            await database.set_setting("global", GLOBAL_OWNER_ID, "reply_to_message", "1")
+            await database.set_setting("global", GLOBAL_OWNER_ID, "include_sender_quote", "1")
+            await database.set_setting("group", -100, "enable_hashtags", "0")
 
             group_update = SimpleNamespace(
                 effective_chat=SimpleNamespace(id=-100, type="supergroup"),
@@ -35,8 +38,11 @@ def test_effective_settings_inherit_global_and_allow_group_override(tmp_path):
             group_settings = await get_effective_settings(database, group_update)
             dm_settings = await get_effective_settings(database, dm_update)
 
-            assert group_settings.enable_hashtags is True
+            assert group_settings.enable_hashtags is False
             assert dm_settings.enable_hashtags is False
+            assert dm_settings.caption_above_media is True
+            assert dm_settings.reply_to_message is False
+            assert dm_settings.include_sender_quote is False
         finally:
             await database.close()
 
@@ -230,6 +236,69 @@ def test_provider_switches_are_global_and_default_to_enabled(tmp_path):
             assert await is_provider_enabled(database, "spotify") is True
             assert await toggle_provider(database, "spotify") is False
             assert await is_provider_enabled(database, "spotify") is False
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_media_cache_round_trip(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            await database.upsert_cached_media(
+                "https://pbs.twimg.com/media/example.jpg",
+                "photo",
+                "telegram-file-id",
+                "unique-id",
+                width=1200,
+                height=800,
+            )
+            cached = await database.get_cached_media("https://pbs.twimg.com/media/example.jpg")
+            assert cached is not None
+            assert cached["file_id"] == "telegram-file-id"
+            assert cached["width"] == 1200
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_delivery_lookup_returns_every_output_message(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            await database.record_delivery_message(-100, 10, 42, 20)
+            await database.record_delivery_message(-100, 10, 42, 21)
+            delivery = await database.get_delivery_for_message(-100, 21)
+            assert delivery is not None
+            assert delivery["requester_user_id"] == 42
+            assert delivery["message_ids"] == [20, 21]
+
+            await database.delete_delivery(delivery["id"])
+            assert await database.get_delivery_for_message(-100, 20) is None
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_delete_cached_media_removes_only_selected_urls(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            await database.upsert_cached_media("https://pbs.twimg.com/media/one.jpg", "photo", "one")
+            await database.upsert_cached_media("https://pbs.twimg.com/media/two.jpg", "photo", "two")
+            await database.delete_cached_media(["https://pbs.twimg.com/media/one.jpg"])
+
+            assert await database.get_cached_media("https://pbs.twimg.com/media/one.jpg") is None
+            assert await database.get_cached_media("https://pbs.twimg.com/media/two.jpg") is not None
         finally:
             await database.close()
 

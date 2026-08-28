@@ -29,9 +29,12 @@ class TweetStats:
 
 @dataclass
 class MediaItem:
-    type: str  # 'photo' или 'video'
+    type: str  # photo, video or animation
     url: str
     thumbnail_url: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration: Optional[int] = None
 
 
 @dataclass
@@ -42,6 +45,9 @@ class QuotedTweet:
     text: str
     date: Optional[datetime] = None
     media: list[MediaItem] = field(default_factory=list)
+    tweet_id: Optional[str] = None
+    translated_text: Optional[str] = None
+    source_language: Optional[str] = None
 
 
 @dataclass
@@ -53,6 +59,7 @@ class Tweet:
     date: datetime
     media: list[MediaItem] = field(default_factory=list)
     quoted_tweet: Optional[QuotedTweet] = None
+    parent_tweet: Optional[QuotedTweet] = None
     stats: TweetStats = field(default_factory=TweetStats)
     poll: Optional[Poll] = None
     translated_text: Optional[str] = None

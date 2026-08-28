@@ -1,17 +1,20 @@
 import asyncio
 
-from src.bot import build_application
+from aiogram import Bot
+
+from src.bot import build_dispatcher
 from src.config import config
 from src.services.download_queue import DownloadQueue
+from src.telegram_runtime import ApplicationState, BotAdapter
 
 
-def test_application_enables_bounded_concurrent_updates(monkeypatch):
-    monkeypatch.setattr(config, "BOT_TOKEN", "123456:test-token")
+def test_dispatcher_enables_bounded_concurrent_updates(monkeypatch):
     monkeypatch.setattr(config, "MAX_CONCURRENT_UPDATES", 8)
 
-    application = build_application()
+    bot = BotAdapter(Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"))
+    dispatcher = build_dispatcher(bot, ApplicationState())
 
-    assert application.update_processor.max_concurrent_updates == 8
+    assert dispatcher["max_concurrent_updates"] == 8
 
 
 def test_download_queue_runs_two_jobs_concurrently():

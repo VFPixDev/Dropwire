@@ -1,6 +1,6 @@
 from html import escape
 
-from telegram import User
+from aiogram.types import User
 
 
 def format_sender_quote(user: User, comment: str | None, mode: str) -> str:

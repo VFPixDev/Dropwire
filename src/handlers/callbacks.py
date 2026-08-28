@@ -1,12 +1,21 @@
 """Callback handlers for inline menus."""
 
+from __future__ import annotations
+
 import logging
 from html import escape
 
-from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
-from telegram.ext import ContextTypes
+from aiogram.enums import ParseMode
+
+from src.telegram_runtime import (
+    BadRequest,
+    CallbackQueryAdapter as CallbackQuery,
+    ContextTypes,
+    Forbidden,
+    TelegramError,
+    Update,
+)
+from src.telegram_ui import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.config import config
 from src.handlers.menus import (
@@ -17,7 +26,6 @@ from src.handlers.menus import (
     CALLBACK_SETTINGS,
     CALLBACK_TRANSLATE,
     CB_ADMIN_PROVIDER,
-    CB_SETTINGS_DM,
     CB_SETTINGS_GLOBAL,
     CB_SETTINGS_GROUP,
     CB_SETTINGS_GROUPS,
@@ -99,8 +107,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await show_settings_hub(query, user_id)
     elif callback_data == CB_SETTINGS_GLOBAL:
         await show_global_settings(query, context, user_id)
-    elif callback_data == CB_SETTINGS_DM:
-        await show_scope_settings(query, context, "dm", user_id)
     elif callback_data == CB_SETTINGS_GROUPS or callback_data.startswith(f"{CB_SETTINGS_GROUPS}:"):
         await show_groups(query, context, user_id, callback_data)
     elif callback_data.startswith(CB_SETTINGS_GROUP):
@@ -775,7 +781,7 @@ async def _ensure_scope_write_allowed(
     scope: str,
     owner_id: int,
 ) -> bool:
-    if scope not in {"global", "group", "dm"}:
+    if scope not in {"global", "group"}:
         await query.answer("Неизвестный раздел настроек", show_alert=True)
         return False
     if scope == "global" and owner_id != GLOBAL_OWNER_ID:
@@ -783,9 +789,6 @@ async def _ensure_scope_write_allowed(
         return False
     if scope == "global" and not is_admin(user_id):
         await query.answer("Глобальные настройки доступны только администратору", show_alert=True)
-        return False
-    if scope == "dm" and owner_id != user_id:
-        await query.answer("Личные настройки можно менять только себе", show_alert=True)
         return False
     if scope == "group" and owner_id >= 0:
         await query.answer("Некорректный идентификатор группы", show_alert=True)
@@ -839,7 +842,7 @@ async def _scope_title(database: Database | None, scope: str, owner_id: int) -> 
     if scope == "global":
         return "Глобальные настройки"
     if scope == "dm":
-        return "Личные настройки"
+        return "Для меня"
     if scope == "group":
         group = await database.get_group(owner_id) if database is not None else None
         title = str(group["title"]) if group is not None else str(owner_id)
@@ -876,7 +879,7 @@ async def _user_can_manage_group(
         logger.debug("Не удалось проверить админство user_id=%s chat_id=%s", user_id, chat_id, exc_info=True)
         return False
 
-    status = str(member.status)
+    status = str(getattr(member.status, "value", member.status))
     if status in {"left", "kicked", "banned"}:
         return False
     return linked_as_adder or status in {"administrator", "creator", "owner"}

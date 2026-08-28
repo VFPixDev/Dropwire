@@ -62,3 +62,44 @@ def test_parse_tweet_html_attaches_video_thumbnail_without_duplicate_photo():
     assert len(tweet.media) == 1
     assert tweet.media[0].type == "video"
     assert tweet.media[0].thumbnail_url == "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/preview.jpg"
+
+
+def test_parse_tweet_html_collects_repeated_and_indexed_image_meta():
+    html = """
+    <html><head>
+      <meta property="og:title" content="Gallery (@gallery)" />
+      <meta property="og:description" content="Four photos" />
+      <meta property="og:image" content="https://pbs.twimg.com/media/one.jpg" />
+      <meta property="og:image" content="https://pbs.twimg.com/media/two.jpg" />
+      <meta name="twitter:image:1" content="https://pbs.twimg.com/media/three.jpg" />
+      <meta property="og:image:2" content="https://pbs.twimg.com/media/four.jpg" />
+    </head></html>
+    """
+
+    tweet = parse_tweet_html(html, "https://x.com/gallery/status/123")
+
+    assert tweet is not None
+    assert [item.url for item in tweet.media] == [
+        "https://pbs.twimg.com/media/one.jpg",
+        "https://pbs.twimg.com/media/two.jpg",
+        "https://pbs.twimg.com/media/three.jpg",
+        "https://pbs.twimg.com/media/four.jpg",
+    ]
+
+
+def test_parse_tweet_html_expands_fxtwitter_mosaic():
+    html = """
+    <html><head>
+      <meta property="og:title" content="Gallery (@gallery)" />
+      <meta property="og:description" content="Mosaic" />
+      <meta property="og:image" content="https://mosaic.fxtwitter.com/123/Photo_A/Photo-B" />
+    </head></html>
+    """
+
+    tweet = parse_tweet_html(html, "https://x.com/gallery/status/123")
+
+    assert tweet is not None
+    assert [item.url for item in tweet.media] == [
+        "https://pbs.twimg.com/media/Photo_A?format=jpg&name=orig",
+        "https://pbs.twimg.com/media/Photo-B?format=jpg&name=orig",
+    ]

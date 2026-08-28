@@ -1,5 +1,8 @@
 from src.utils.text_format import format_number, create_progress_bar, format_poll
-from src.twitter.models import Poll, PollOption
+from datetime import datetime
+
+from src.twitter.models import MediaItem, Poll, PollOption, Tweet, TweetStats
+from src.utils.text_format import format_tweet_card
 
 
 def test_format_number():
@@ -43,3 +46,19 @@ def test_format_poll():
     assert "60%" in result
     assert "250 голосов" in result
     assert "завершён" in result
+
+
+def test_media_only_tweet_has_exactly_one_empty_row_before_stats():
+    tweet = Tweet(
+        display_name="Media",
+        username="media",
+        url="https://x.com/media/status/1",
+        text="",
+        date=datetime(2026, 8, 26, 12, 0),
+        media=[MediaItem(type="photo", url="https://pbs.twimg.com/media/one.jpg")],
+        stats=TweetStats(replies=1, reposts=2, likes=3, views=4),
+    )
+
+    rendered = format_tweet_card(tweet)
+    assert "12:00\n\n💬 1" in rendered
+    assert "12:00\n\n\n💬 1" not in rendered

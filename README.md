@@ -6,14 +6,14 @@ Dropwire is one Telegram bot that turns social links into compact media cards.
 
 ## Providers
 
-- Twitter/X: text, media, stats, quotes, polls and optional translation.
+- Twitter/X: text, photos, native GIF animations, video, stats, quotes, replies, polls and optional translation.
 - YouTube: thumbnail, title, author, duration, date, stats and browser downloads.
 - Spotify: artwork and title without credentials; richer metadata with optional API credentials.
 - SoundCloud: artwork, title and author through the official oEmbed endpoint.
 
 Every card can include source, media type and author hashtags. A comment before the first link is rendered as a sender quote. Multiple supported links in one message are handled in order.
 
-Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated result. Twitter/X video posts are sent as native Telegram videos; Twitter photo posts and all other providers keep their compact cards. Telegram does not expose the destination chat ID to inline bots, so inline results use the sender's DM settings over global defaults; group-specific settings cannot apply.
+Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <link>` in any Telegram chat and select the generated result. Twitter/X uses Telegram Rich Messages for structured text, native multi-photo collages, quoted/replied-to post media and the original-link button in one message. GIF posts use native Telegram animation playback. Telegram does not expose the destination chat ID to inline bots, so inline results use Dropwire's compact private-chat defaults; group-specific settings cannot apply.
 
 ## Telegram UX
 
@@ -21,16 +21,16 @@ Inline mode is supported after enabling it in BotFather: type `@dropwire_bot <li
 - `/settings` - settings for the current context.
 - `/downloads` - recent files that are still retained.
 - `/help` - supported links and usage.
-- `/status` - runtime status for the owner, settings for other users.
 - `/admin` - owner-only provider controls and runtime counters.
+- `/del` - in a group, reply to a Dropwire card to remove it. The original link sender and group administrators are allowed.
 
 Settings are deliberately separated by scope:
 
 - Global settings are available only to users listed in `BOT_ADMIN_IDS`.
 - Group settings are edited in DM by the user who added the bot or a current Telegram group administrator.
-- DM settings affect only that user's private chat.
+- Private chats and inline results use fixed compact defaults: caption above media, no hashtags, sender quote or reply.
 - Inside a group, users can configure their own translation; group translation requires group admin rights.
-- DM and group profiles can be reset to inherited global values.
+- Group profiles can be reset to inherited global values.
 
 ## Quick Start
 
@@ -40,7 +40,7 @@ The release image is published as `ghcr.io/vfpixdev/dropwire`. For a private pac
 docker login ghcr.io
 cp .env.example .env
 # Set BOT_TOKEN, BOT_ADMIN_IDS and YOUTUBE_API_KEY.
-DROPWIRE_IMAGE=ghcr.io/vfpixdev/dropwire:1.1.0 docker compose up -d
+DROPWIRE_IMAGE=ghcr.io/vfpixdev/dropwire:1.2.0 docker compose up -d
 docker compose ps
 ```
 
@@ -55,6 +55,12 @@ docker compose ps
 ```
 
 Enable inline mode once in `@BotFather`: run `/setinline`, select `@dropwire_bot`, and set a placeholder such as `Вставьте ссылку из Twitter, YouTube, Spotify или SoundCloud`.
+
+### Inline Twitter media
+
+Rich inline messages can reuse only media already uploaded to Telegram. Dropwire obtains the required `file_id` from ordinary Twitter cards that Telegram has already delivered and stores only the reusable identifier and technical dimensions in SQLite. It never sends technical staging messages to users or to a cache channel.
+
+If an inline request references media that has not been delivered by the bot before, Dropwire returns its compact inline fallback. Once the same media has appeared in an ordinary private or group card, future inline results can reuse it in a Rich Message collage.
 
 The web service is exposed on `http://localhost:8080` by default. YouTube browser links stay disabled until `WEB_BASE_URL` is a public HTTPS address that reaches this service.
 
@@ -131,4 +137,4 @@ Audio-only downloads use M4A/AAC. Spotify and SoundCloud content is not download
 - `https://soundcloud.com/artist/track`
 - `https://on.soundcloud.com/...`
 
-See [SECURITY.md](SECURITY.md) and [TESTING.md](TESTING.md) before exposing the service publicly.
+See [Security](.github/SECURITY.md) and [Testing](docs/TESTING.md) before exposing the service publicly.

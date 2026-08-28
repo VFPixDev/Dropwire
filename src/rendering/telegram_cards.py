@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from html import escape
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from src.telegram_ui import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.models.media_card import Button, MediaCard
 from src.rendering.hashtags import render_hashtags

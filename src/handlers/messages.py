@@ -1,10 +1,13 @@
+from __future__ import annotations
+
 import logging
 from typing import Optional
 
-from telegram import Update, InputMediaPhoto, InputMediaVideo, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
-from telegram.error import NetworkError, TelegramError, TimedOut
+from aiogram.enums import ParseMode
+from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, ReplyParameters
+
+from src.telegram_runtime import BadRequest, ContextTypes, NetworkError, TelegramError, TimedOut, Update
+from src.telegram_ui import InlineKeyboardButton, InlineKeyboardMarkup
 from src.config import config
 from src.providers.link_router import LinkMatch, find_supported_links
 from src.providers.youtube import fetch_youtube_card
@@ -12,11 +15,11 @@ from src.providers.spotify import fetch_spotify_card
 from src.providers.soundcloud import fetch_soundcloud_card
 from src.rendering.hashtags import build_hashtags, render_hashtags
 from src.rendering.telegram_cards import build_card_keyboard, format_card_text
+from src.rendering.twitter_rich import build_twitter_rich_message
 from src.twitter.normalize import normalize_url, extract_tweet_id, extract_username
-from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html
-from src.twitter.parser import parse_tweet_html
-from src.twitter.parser_api import parse_tweet_api
+from src.twitter.loader import fetch_complete_tweet
 from src.services.database import Database
+from src.services.media_cache import remember_sent_rich_media
 from src.services.settings import (
     EffectiveSettings,
     get_effective_settings,
@@ -26,7 +29,7 @@ from src.services.settings import (
 )
 from src.services.providers import is_provider_enabled
 from src.utils.sender_quote import format_sender_quote
-from src.utils.text_format import format_tweet_card, shorten_text_for_caption
+from src.utils.text_format import format_tweet_card, format_tweet_footer, has_tweet_translation, shorten_text_for_caption
 from src.utils.rate_limit import rate_limiter
 from src.media.download import download_media_file, get_file_size_mb
 from src.media.compress import compress_image, compress_video
@@ -50,12 +53,7 @@ def get_tweet_url_keyboard(tweet_url: str) -> InlineKeyboardMarkup:
 
 
 def telegram_timeout_kwargs() -> dict[str, float]:
-    return {
-        "connect_timeout": config.TELEGRAM_CONNECT_TIMEOUT,
-        "read_timeout": config.TELEGRAM_READ_TIMEOUT,
-        "write_timeout": config.TELEGRAM_WRITE_TIMEOUT,
-        "pool_timeout": config.TELEGRAM_POOL_TIMEOUT,
-    }
+    return {"request_timeout": max(config.TELEGRAM_READ_TIMEOUT, config.TELEGRAM_WRITE_TIMEOUT)}
 
 
 def build_sender_quote_prefix(
@@ -97,9 +95,79 @@ async def send_text_message(
     chat_id = chat.id
     reply_to_message_id = get_reply_to_message_id(update, settings)
     send_kwargs = {**telegram_timeout_kwargs(), **kwargs}
-    await context.bot.send_message(
+    return await context.bot.send_message(
         chat_id=chat_id, text=text, message_thread_id=thread_id, reply_to_message_id=reply_to_message_id, **send_kwargs
     )
+
+
+async def _record_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE, sent) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    source = update.message
+    if chat is None or user is None or source is None or chat.type not in {"group", "supergroup"}:
+        return
+    database = context.application.bot_data.get("database")
+    if not isinstance(database, Database):
+        return
+    messages = sent if isinstance(sent, (list, tuple)) else [sent]
+    try:
+        for message in messages:
+            message_id = getattr(message, "message_id", None)
+            if isinstance(message_id, int):
+                await database.record_delivery_message(chat.id, source.message_id, user.id, message_id)
+    except Exception:
+        logger.exception("Не удалось сохранить журнал доставки chat_id=%s", chat.id)
+
+
+async def _try_send_rich_tweet_card(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    tweet,
+    thread_id: int | None,
+    settings: EffectiveSettings | None,
+    user_comment: str | None,
+    hashtags: str,
+):
+    database_value = context.application.bot_data.get("database")
+    database = database_value if isinstance(database_value, Database) else None
+    if update.effective_chat is None:
+        return None
+
+    sender_quote = build_sender_quote_prefix(update, user_comment, settings)
+    rich = await build_twitter_rich_message(
+        context.bot,
+        database,
+        tweet,
+        sender_quote=sender_quote,
+        hashtags=hashtags,
+    )
+    if rich is None:
+        return None
+
+    reply_to_message_id = get_reply_to_message_id(update, settings)
+    reply_parameters = ReplyParameters(message_id=reply_to_message_id) if reply_to_message_id else None
+    try:
+        sent = await context.bot.send_rich_message(
+            chat_id=update.effective_chat.id,
+            rich_message=rich.message,
+            message_thread_id=thread_id,
+            reply_parameters=reply_parameters,
+            reply_markup=get_tweet_url_keyboard(tweet.url),
+            **telegram_timeout_kwargs(),
+        )
+        if database is not None and getattr(sent, "rich_message", None) is not None:
+            try:
+                await remember_sent_rich_media(database, tweet, sent.rich_message)
+            except Exception:
+                logger.warning("Не удалось сохранить Telegram file_id из Rich Message", exc_info=True)
+    except BadRequest as exc:
+        logger.info("Telegram отклонил Rich Message, используется media fallback: %s", exc)
+        if database is not None and rich.cache_urls:
+            await database.delete_cached_media(list(rich.cache_urls))
+        return None
+
+    await _record_delivery(update, context, sent)
+    return sent
 
 
 def should_reply_in_chat(update: Update, settings: EffectiveSettings) -> bool:
@@ -146,26 +214,42 @@ async def send_tweet_card(
         logger.warning("Не удалось отправить твит: нет effective_chat/effective_user")
         return
 
-    # Всегда показываем оригинальный текст
-    # Информацию о переводе добавим в конец карточки если есть
-    include_translation = bool(tweet.translated_text)
-
-    # Форматируем карточку
-    card_text = format_tweet_card(tweet, include_translation=include_translation)
-    card_text = prepend_sender_quote(card_text, update, user_comment, settings)
+    include_translation = has_tweet_translation(tweet)
+    hashtags = ""
     enable_hashtags = settings.enable_hashtags if settings else config.ENABLE_HASHTAGS
-    caption_above_media = settings.caption_above_media if settings else config.CAPTION_ABOVE_MEDIA
     if enable_hashtags:
         hashtags = render_hashtags(build_hashtags("twitter", "post", tweet.username))
-        if hashtags:
-            card_text = f"{card_text}\n\n{hashtags}"
+
+    card_text = format_tweet_card(tweet, include_translation=include_translation)
+    footer = format_tweet_footer(tweet, hashtags)
+    if footer:
+        card_text = f"{card_text}\n\n{footer}"
+    card_text = prepend_sender_quote(card_text, update, user_comment, settings)
+    caption_above_media = settings.caption_above_media if settings else config.CAPTION_ABOVE_MEDIA
 
     temp_files = []
+    card_media = list(tweet.media)
+    if tweet.quoted_tweet:
+        card_media.extend(tweet.quoted_tweet.media)
+    if tweet.parent_tweet:
+        card_media.extend(tweet.parent_tweet.media)
 
     try:
+        rich_sent = await _try_send_rich_tweet_card(
+            update,
+            context,
+            tweet,
+            thread_id,
+            settings,
+            user_comment,
+            hashtags,
+        )
+        if rich_sent is not None:
+            return
+
         # Если нет медиа - просто отправляем текст
-        if not tweet.media:
-            await send_text_message(
+        if not card_media:
+            sent = await send_text_message(
                 update,
                 context,
                 card_text,
@@ -175,18 +259,19 @@ async def send_tweet_card(
                 reply_markup=get_tweet_url_keyboard(tweet.url),
                 settings=settings,
             )
+            await _record_delivery(update, context, sent)
             return
 
         # Скачиваем медиа
         media_files = []
-        for media_item in tweet.media[:10]:  # Ограничение 10 медиа
+        for media_item in card_media[:10]:  # Ограничение Telegram: 10 медиа
             file_path = await download_media_file(media_item.url, media_item.type)
             if file_path:
                 # Сжимаем если нужно
                 if media_item.type == "photo":
                     compressed_path = compress_image(file_path)
                 else:
-                    compressed_path = compress_video(file_path)
+                    compressed_path = compress_video(file_path, is_animation=media_item.type == "animation")
 
                 if get_file_size_mb(compressed_path) > config.MAX_MEDIA_MB:
                     logger.warning(
@@ -197,14 +282,14 @@ async def send_tweet_card(
                         temp_files.append(compressed_path)
                     continue
 
-                media_files.append((media_item.type, compressed_path))
+                media_files.append((media_item, compressed_path))
                 temp_files.append(file_path)
                 if compressed_path != file_path:
                     temp_files.append(compressed_path)
 
         if not media_files:
             # Медиа не удалось скачать
-            await send_text_message(
+            sent = await send_text_message(
                 update,
                 context,
                 card_text + "\n\n⚠️ Не удалось загрузить медиа",
@@ -213,6 +298,7 @@ async def send_tweet_card(
                 disable_web_page_preview=True,
                 settings=settings,
             )
+            await _record_delivery(update, context, sent)
             return
 
         # Проверяем длину caption
@@ -221,7 +307,7 @@ async def send_tweet_card(
 
         # Если текст слишком длинный - отправляем отдельно
         if is_truncated or len(card_text) > 1024:
-            await send_text_message(
+            sent_text = await send_text_message(
                 update,
                 context,
                 card_text,
@@ -230,87 +316,92 @@ async def send_tweet_card(
                 disable_web_page_preview=True,
                 settings=settings,
             )
+            await _record_delivery(update, context, sent_text)
             caption = None
 
         # Отправляем медиа
         if len(media_files) == 1:
             # Одно медиа
-            media_type, file_path = media_files[0]
+            media_item, file_path = media_files[0]
             reply_to_message_id = get_reply_to_message_id(update, settings)
-
-            with open(file_path, "rb") as f:
-                if media_type == "photo":
-                    await context.bot.send_photo(
-                        chat_id=update.effective_chat.id,
-                        photo=f,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML if caption else None,
-                        message_thread_id=thread_id,
-                        reply_to_message_id=reply_to_message_id,
-                        show_caption_above_media=caption_above_media,
-                        reply_markup=get_tweet_url_keyboard(tweet.url),
-                        **telegram_timeout_kwargs(),
-                    )
-                else:
-                    await context.bot.send_video(
-                        chat_id=update.effective_chat.id,
-                        video=f,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML if caption else None,
-                        message_thread_id=thread_id,
-                        reply_to_message_id=reply_to_message_id,
-                        show_caption_above_media=caption_above_media,
-                        reply_markup=get_tweet_url_keyboard(tweet.url),
-                        **telegram_timeout_kwargs(),
-                    )
+            upload = FSInputFile(file_path)
+            common_kwargs = {
+                "chat_id": update.effective_chat.id,
+                "caption": caption,
+                "parse_mode": ParseMode.HTML if caption else None,
+                "message_thread_id": thread_id,
+                "reply_to_message_id": reply_to_message_id,
+                "show_caption_above_media": caption_above_media,
+                "reply_markup": get_tweet_url_keyboard(tweet.url),
+                **telegram_timeout_kwargs(),
+            }
+            if media_item.type == "photo":
+                sent = await context.bot.send_photo(photo=upload, **common_kwargs)
+            elif media_item.type == "animation":
+                sent = await context.bot.send_animation(
+                    animation=upload,
+                    width=media_item.width,
+                    height=media_item.height,
+                    duration=media_item.duration,
+                    **common_kwargs,
+                )
+            else:
+                sent = await context.bot.send_video(
+                    video=upload,
+                    width=media_item.width,
+                    height=media_item.height,
+                    duration=media_item.duration,
+                    supports_streaming=True,
+                    **common_kwargs,
+                )
+            await _record_delivery(update, context, sent)
         else:
             # Несколько медиа - альбом
             media_group: list[InputMediaPhoto | InputMediaVideo] = []
-            opened_files = []
             reply_to_message_id = get_reply_to_message_id(update, settings)
 
-            try:
-                for idx, (media_type, file_path) in enumerate(media_files):
-                    f = open(file_path, "rb")
-                    opened_files.append(f)
+            for idx, (media_item, file_path) in enumerate(media_files):
+                upload = FSInputFile(file_path)
+                if media_item.type == "photo":
+                    media_obj: InputMediaPhoto | InputMediaVideo = InputMediaPhoto(
+                        media=upload,
+                        caption=caption if idx == 0 else None,
+                        parse_mode=ParseMode.HTML if (idx == 0 and caption) else None,
+                        show_caption_above_media=caption_above_media,
+                    )
+                else:
+                    # Telegram albums do not support animations. This branch is
+                    # only a defensive fallback; X normally exposes one GIF.
+                    media_obj = InputMediaVideo(
+                        media=upload,
+                        caption=caption if idx == 0 else None,
+                        parse_mode=ParseMode.HTML if (idx == 0 and caption) else None,
+                        show_caption_above_media=caption_above_media,
+                        width=media_item.width,
+                        height=media_item.height,
+                        duration=media_item.duration,
+                        supports_streaming=media_item.type == "video",
+                    )
 
-                    if media_type == "photo":
-                        media_obj: InputMediaPhoto | InputMediaVideo = InputMediaPhoto(
-                            media=f,
-                            caption=caption if idx == 0 else None,
-                            parse_mode=ParseMode.HTML if (idx == 0 and caption) else None,
-                            show_caption_above_media=caption_above_media,
-                        )
-                    else:
-                        media_obj = InputMediaVideo(
-                            media=f,
-                            caption=caption if idx == 0 else None,
-                            parse_mode=ParseMode.HTML if (idx == 0 and caption) else None,
-                            show_caption_above_media=caption_above_media,
-                        )
+                media_group.append(media_obj)
 
-                    media_group.append(media_obj)
+            sent_album = await context.bot.send_media_group(
+                chat_id=update.effective_chat.id,
+                media=media_group,
+                message_thread_id=thread_id,
+                reply_to_message_id=reply_to_message_id,
+                **telegram_timeout_kwargs(),
+            )
 
-                await context.bot.send_media_group(
-                    chat_id=update.effective_chat.id,
-                    media=media_group,
-                    message_thread_id=thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    **telegram_timeout_kwargs(),
-                )
-
-                # Отправляем кнопку с ссылкой после альбома (media_group не поддерживает reply_markup)
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="👆",
-                    message_thread_id=thread_id,
-                    reply_markup=get_tweet_url_keyboard(tweet.url),
-                    **telegram_timeout_kwargs(),
-                )
-            finally:
-                # Закрываем все открытые файлы
-                for f in opened_files:
-                    f.close()
+            # Telegram media groups cannot carry an inline keyboard.
+            sent_button = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="👆",
+                message_thread_id=thread_id,
+                reply_markup=get_tweet_url_keyboard(tweet.url),
+                **telegram_timeout_kwargs(),
+            )
+            await _record_delivery(update, context, [*sent_album, sent_button])
 
     except (TimedOut, NetworkError) as e:
         # Telegram may have accepted the upload before the client timed out. A
@@ -318,7 +409,7 @@ async def send_tweet_card(
         logger.warning("Неоднозначный сетевой результат при отправке медиа; повтор не выполняется: %s", e)
     except TelegramError as e:
         logger.error("Ошибка Telegram при отправке медиа: %s", e)
-        await send_text_message(
+        sent = await send_text_message(
             update,
             context,
             f"⚠️ Telegram не смог отправить медиафайл.\n\n{card_text}",
@@ -327,6 +418,7 @@ async def send_tweet_card(
             disable_web_page_preview=True,
             settings=settings,
         )
+        await _record_delivery(update, context, sent)
     finally:
         # Удаляем временные файлы
         delete_files(temp_files)
@@ -364,30 +456,7 @@ async def process_tweet_url(
     # Получаем данные твита
     logger.info(f"Обработка твита: {tweet_id} (язык: {lang_code or 'нет'})")
 
-    # Сначала пробуем структурированный API, HTML оставляем как fallback.
-    tweet = None
-    api_data = await fetch_tweet_data(tweet_id, username, lang_code)
-    if api_data:
-        tweet = parse_tweet_api(api_data, normalized_url)
-
-    needs_html_fallback = tweet is None or (lang_code and not tweet.translated_text)
-    if needs_html_fallback:
-        html = await fetch_tweet_html(tweet_id, username, lang_code)
-
-        if not html:
-            if tweet is None:
-                await send_text_message(
-                    update,
-                    context,
-                    f"❌ Твит недоступен (возможно приватный, удалён или 18+): {original_url}",
-                    thread_id=thread_id,
-                    settings=settings,
-                )
-                return False
-        else:
-            html_tweet = parse_tweet_html(html, normalized_url)
-            if html_tweet:
-                tweet = html_tweet
+    tweet = await fetch_complete_tweet(normalized_url, tweet_id, username, lang_code)
 
     if not tweet:
         await send_text_message(
@@ -439,7 +508,7 @@ async def send_media_card(
 
     if card.thumbnail_url:
         try:
-            await context.bot.send_photo(
+            sent = await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
                 photo=card.thumbnail_url,
                 caption=text,
@@ -450,11 +519,12 @@ async def send_media_card(
                 reply_markup=keyboard,
                 **telegram_timeout_kwargs(),
             )
+            await _record_delivery(update, context, sent)
         except (TimedOut, NetworkError):
             raise
         except TelegramError as exc:
             logger.warning("Telegram отклонил превью %s, отправляется текстовая карточка: %s", card.source, exc)
-            await send_text_message(
+            sent = await send_text_message(
                 update,
                 context,
                 text,
@@ -464,9 +534,10 @@ async def send_media_card(
                 reply_markup=keyboard,
                 settings=settings,
             )
+            await _record_delivery(update, context, sent)
         return
 
-    await send_text_message(
+    sent = await send_text_message(
         update,
         context,
         text,
@@ -476,6 +547,7 @@ async def send_media_card(
         reply_markup=keyboard,
         settings=settings,
     )
+    await _record_delivery(update, context, sent)
 
 
 async def process_youtube_url(

@@ -18,7 +18,7 @@
 - Owner checks for global and provider settings.
 - Optional user whitelist enforced for messages, commands and callback actions.
 - Group-adder or live Telegram-admin checks for group settings.
-- User ownership checks for DM settings and download callbacks.
+- Per-user ownership checks for translation preferences and download callbacks.
 - Atomic download request claiming and per-user active limits.
 - Interrupted active downloads marked failed on startup so users cannot remain locked out.
 - HMAC-signed expiring download links with traversal protection.
@@ -27,7 +27,11 @@
 - Exact provider host matching to reject lookalike domains.
 - HTML escaping for user, channel and group supplied text.
 - No automatic retry after ambiguous Telegram upload timeouts.
-- Dependency vulnerability audit in the documented test flow.
+- Trusted-host validation before Twitter media is uploaded in an ordinary Rich Message.
+- Inline media reuses only Telegram identifiers learned from delivered cards; uncached inline requests use a compact fallback and never create staging messages.
+- Group card deletion authorized against the original requester, bot owners or live group administrators.
+- Delivery records expire after Telegram's 48-hour deletion window.
+- Python dependency and production-container vulnerability audits in the documented test flow.
 - Read-only non-root containers with all Linux capabilities dropped and loopback-only web binding by default.
 
 ## Secrets

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
@@ -6,20 +8,20 @@ import logging
 import re
 from urllib.parse import parse_qs, urlparse
 
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
+from aiogram.types import (
     InlineQueryResult,
     InlineQueryResultArticle,
+    InlineQueryResultMpeg4Gif,
     InlineQueryResultPhoto,
     InlineQueryResultVideo,
+    InputRichMessageContent,
     InputTextMessageContent,
-    Update,
     User,
 )
-from telegram.constants import ParseMode
-from telegram.error import BadRequest
-from telegram.ext import ContextTypes
+from aiogram.enums import ParseMode
+
+from src.telegram_runtime import BadRequest, ContextTypes, Update
+from src.telegram_ui import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.config import config
 from src.handlers.messages import telegram_timeout_kwargs
@@ -30,16 +32,16 @@ from src.providers.spotify import fetch_spotify_card
 from src.providers.youtube import fetch_youtube_card
 from src.rendering.hashtags import build_hashtags, render_hashtags
 from src.rendering.telegram_cards import format_card_text
+from src.rendering.twitter_rich import build_twitter_rich_message
 from src.services.database import Database
 from src.services.providers import is_provider_enabled
 from src.services.settings import EffectiveSettings, get_effective_settings, get_translation_language, is_user_allowed
-from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html, get_trusted_twitter_mp4_url
+from src.twitter.fetcher import get_trusted_twitter_mp4_url
+from src.twitter.loader import fetch_complete_tweet
 from src.twitter.normalize import extract_tweet_id, extract_username, normalize_url
-from src.twitter.parser import parse_tweet_html
-from src.twitter.parser_api import parse_tweet_api
 from src.twitter.models import Tweet
 from src.utils.sender_quote import format_sender_quote
-from src.utils.text_format import format_tweet_card
+from src.utils.text_format import format_tweet_card, format_tweet_footer, has_tweet_translation
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ _inline_fetch_slots = asyncio.Semaphore(4)
 class BuiltInlineResult:
     primary: InlineQueryResult
     fallback: InlineQueryResultArticle
+    cache_urls: tuple[str, ...] = ()
 
 
 async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -99,9 +102,11 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         await _answer_inline(query, [built.primary])
     except BadRequest as exc:
-        if isinstance(built.primary, InlineQueryResultArticle):
+        if built.primary is built.fallback:
             raise
         logger.info("Telegram rejected inline preview, using article fallback: %s", exc)
+        if database is not None and built.cache_urls:
+            await database.delete_cached_media(list(built.cache_urls))
         await _answer_inline(query, [built.fallback], cache_time=1)
 
 
@@ -119,16 +124,35 @@ async def _build_inline_result(
         if tweet is None:
             return None
 
-        text = format_tweet_card(tweet, include_translation=bool(tweet.translated_text))
+        hashtags = ""
         if settings.enable_hashtags:
             hashtags = render_hashtags(build_hashtags("twitter", "post", tweet.username))
-            if hashtags:
-                text = f"{text}\n\n{hashtags}"
-        text = _prepend_sender_quote(text, user, comment, settings)
+        text = format_tweet_card(tweet, include_translation=has_tweet_translation(tweet))
+        footer = format_tweet_footer(tweet, hashtags)
+        if footer:
+            text = f"{text}\n\n{footer}"
+        sender_quote = format_sender_quote(user, comment, settings.sender_quote_mode) if settings.include_sender_quote else ""
+        text = f"{sender_quote}\n\n{text}" if sender_quote else text
         preview_url = _tweet_preview_url(tweet)
         title = f"{tweet.display_name} (@{tweet.username})"
         description = _plain_description(tweet.text)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Открыть оригинал", url=tweet.url)]])
+        rich_result = await _build_rich_twitter_result(
+            update,
+            database,
+            link,
+            tweet,
+            title,
+            description,
+            text,
+            preview_url,
+            keyboard,
+            settings,
+            sender_quote=sender_quote,
+            hashtags=hashtags,
+        )
+        if rich_result is not None:
+            return rich_result
         return _build_twitter_result(link, tweet, title, description, text, preview_url, keyboard, settings)
 
     card = await _fetch_media_card(link)
@@ -163,14 +187,7 @@ async def _fetch_tweet(url: str, language: str | None):
     if not tweet_id or not username:
         return None
 
-    data = await fetch_tweet_data(tweet_id, username, language)
-    tweet = parse_tweet_api(data, normalized_url) if data else None
-    if tweet is None or (language and not tweet.translated_text):
-        html = await fetch_tweet_html(tweet_id, username, language)
-        html_tweet = parse_tweet_html(html, normalized_url) if html else None
-        if html_tweet is not None:
-            tweet = html_tweet
-    return tweet
+    return await fetch_complete_tweet(normalized_url, tweet_id, username, language)
 
 
 def _build_result(
@@ -231,6 +248,29 @@ def _build_twitter_result(
     if len(message_text) > 1024:
         return fallback
 
+    for media_item in tweet.media:
+        if media_item.type != "animation":
+            continue
+        animation_url = get_trusted_twitter_mp4_url(media_item.url)
+        thumbnail_url = _trusted_twitter_jpeg_url(media_item.thumbnail_url) or _trusted_twitter_jpeg_url(preview_url)
+        if not animation_url or not thumbnail_url:
+            continue
+        result_key = sha256(f"gif:{link.url}:{message_text}".encode("utf-8")).hexdigest()[:32]
+        animation = InlineQueryResultMpeg4Gif(
+            id=f"g{result_key}",
+            mpeg4_url=animation_url,
+            thumbnail_url=thumbnail_url,
+            mpeg4_width=media_item.width,
+            mpeg4_height=media_item.height,
+            mpeg4_duration=media_item.duration,
+            title=_single_line(title, 120),
+            caption=message_text,
+            parse_mode=ParseMode.HTML,
+            show_caption_above_media=settings.caption_above_media,
+            reply_markup=keyboard,
+        )
+        return BuiltInlineResult(primary=animation, fallback=fallback.fallback)
+
     video_url = None
     thumbnail_url = None
     for media_item in tweet.media:
@@ -264,6 +304,52 @@ def _build_twitter_result(
         reply_markup=keyboard,
     )
     return BuiltInlineResult(primary=video, fallback=fallback.fallback)
+
+
+async def _build_rich_twitter_result(
+    update: Update,
+    database: Database | None,
+    link: LinkMatch,
+    tweet: Tweet,
+    title: str,
+    description: str,
+    text: str,
+    preview_url: str | None,
+    keyboard: InlineKeyboardMarkup | None,
+    settings: EffectiveSettings,
+    sender_quote: str = "",
+    hashtags: str = "",
+) -> BuiltInlineResult | None:
+    rich = await build_twitter_rich_message(
+        update.get_bot(),
+        database,
+        tweet,
+        sender_quote=sender_quote,
+        hashtags=hashtags,
+        inline=True,
+    )
+    if rich is None:
+        return None
+
+    safe_title = _single_line(title, 120) or _source_title(link.source)
+    safe_description = _single_line(description, 180)
+    fallback = _build_twitter_result(link, tweet, title, description, text, preview_url, keyboard, settings).fallback
+    result_key = sha256(f"rich-v2:{link.url}:{text}".encode("utf-8")).hexdigest()[:32]
+    article = InlineQueryResultArticle(
+        id=f"r{result_key}",
+        title=safe_title,
+        description=safe_description,
+        thumbnail_url=preview_url,
+        input_message_content=InputRichMessageContent(
+            rich_message=rich.message
+        ),
+        reply_markup=keyboard,
+    )
+    return BuiltInlineResult(
+        primary=article,
+        fallback=fallback,
+        cache_urls=rich.cache_urls,
+    )
 
 
 def _fit_message_text(text: str, title: str, original_url: str) -> str:
@@ -354,8 +440,5 @@ async def _answer_inline(query, results: list[InlineQueryResult], cache_time: in
         results=results,
         cache_time=cache_time,
         is_personal=True,
-        connect_timeout=min(timeouts["connect_timeout"], 5),
-        read_timeout=min(timeouts["read_timeout"], 5),
-        write_timeout=min(timeouts["write_timeout"], 5),
-        pool_timeout=min(timeouts["pool_timeout"], 5),
+        request_timeout=min(timeouts["request_timeout"], 5),
     )
