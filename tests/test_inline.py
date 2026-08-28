@@ -2,7 +2,13 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
-from aiogram.types import InlineQueryResultArticle, InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, User
+from aiogram.types import (
+    InlineQueryResultArticle,
+    InlineQueryResultMpeg4Gif,
+    InlineQueryResultPhoto,
+    InlineQueryResultVideo,
+    User,
+)
 
 from src.handlers.inline import (
     _build_result,
@@ -223,14 +229,70 @@ def test_rich_inline_collage_supports_quote_media_without_outer_media(tmp_path):
 
             assert built is not None
             rich = built.primary.input_message_content.rich_message
-            assert rich.html.startswith('<p>Outer (<a href="https://x.com/outer">@outer</a>)')
-            assert "<tg-collage>" in rich.html
-            quote_start = rich.html.index("<blockquote>")
-            collage_start = rich.html.index("<tg-collage>")
-            quote_end = rich.html.index("</blockquote>")
-            assert quote_start < collage_start < quote_end
-            assert "Медиа цитируемого поста" not in rich.html
-            assert len(rich.media) == 2
+            assert rich.blocks is None
+            assert '<blockquote><p>Quoted (' in rich.html
+            assert '<tg-collage><img src="tg://photo?id=m0"/><img src="tg://photo?id=m1"/></tg-collage>' in rich.html
+            assert [attachment.media.media for attachment in rich.media] == ["file-0", "file-1"]
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_rich_inline_collage_combines_cached_video_and_photos(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        try:
+            video_url = "https://video.twimg.com/amplify_video/example/vid/avc1/1080x1920/video.mp4"
+            photo_urls = [
+                "https://pbs.twimg.com/media/one.jpg?name=orig",
+                "https://pbs.twimg.com/media/two.jpg?name=orig",
+            ]
+            await database.upsert_cached_media(
+                video_url, "video", "video-file", width=1080, height=1920, duration=74
+            )
+            for index, url in enumerate(photo_urls):
+                await database.upsert_cached_media(url, "photo", f"photo-file-{index}", width=1206, height=882)
+
+            link = LinkMatch("twitter", "https://x.com/mixed/status/3", 0)
+            tweet = Tweet(
+                display_name="Mixed",
+                username="mixed",
+                url=link.url,
+                text="Video and two photos",
+                date=datetime(2026, 8, 27, 7, 47),
+                media=[
+                    MediaItem(type="video", url=video_url, width=1080, height=1920, duration=74),
+                    *(MediaItem(type="photo", url=url, width=1206, height=882) for url in photo_urls),
+                ],
+            )
+            built = await _build_rich_twitter_result(
+                SimpleNamespace(get_bot=lambda: None),
+                database,
+                link,
+                tweet,
+                "Mixed (@mixed)",
+                "Video and two photos",
+                "Video and two photos",
+                photo_urls[0],
+                None,
+                _settings(),
+            )
+
+            assert built is not None
+            rich = built.primary.input_message_content.rich_message
+            assert rich.blocks is None
+            assert (
+                '<tg-collage><video src="tg://video?id=m0"></video>'
+                '<img src="tg://photo?id=m1"/><img src="tg://photo?id=m2"/></tg-collage>'
+            ) in rich.html
+            assert [attachment.media.media for attachment in rich.media] == [
+                "video-file",
+                "photo-file-0",
+                "photo-file-1",
+            ]
         finally:
             await database.close()
 

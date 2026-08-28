@@ -2,6 +2,17 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
+from aiogram.types import (
+    BufferedInputFile,
+    InputRichBlockBlockQuotation,
+    InputRichBlockCollage,
+    InputRichBlockDivider,
+    InputRichBlockFooter,
+    InputRichBlockParagraph,
+    InputRichBlockPhoto,
+    InputRichBlockVideo,
+)
+
 from src.handlers.messages import _try_send_rich_tweet_card
 from src.rendering.twitter_rich import build_twitter_rich_message
 from src.services.database import Database
@@ -16,6 +27,14 @@ class RichBot:
     async def send_rich_message(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(message_id=99)
+
+
+def _plain_rich_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_plain_rich_text(item) for item in value)
+    return _plain_rich_text(getattr(value, "text", ""))
 
 
 def test_group_twitter_collage_is_one_rich_message_with_button_and_delivery(tmp_path):
@@ -65,9 +84,12 @@ def test_group_twitter_collage_is_one_rich_message_with_button_and_delivery(tmp_
             assert len(bot.calls) == 1
             call = bot.calls[0]
             assert call["chat_id"] == -100
-            assert call["rich_message"].html.startswith('<p>Example (<a href="https://x.com/example">@example</a>)')
-            assert "<tg-collage>" in call["rich_message"].html
-            assert [item.media.media for item in call["rich_message"].media] == urls
+            blocks = call["rich_message"].blocks
+            assert isinstance(blocks[0], InputRichBlockParagraph)
+            assert _plain_rich_text(blocks[0].text).startswith("Example (@example)")
+            assert isinstance(blocks[2], InputRichBlockCollage)
+            assert [block.photo.media for block in blocks[2].blocks] == ["file-0", "file-1"]
+            assert call["rich_message"].media is None
             assert call["reply_parameters"].message_id == 7
             assert call["reply_markup"].inline_keyboard[0][0].url == tweet.url
             delivery = await database.get_delivery_for_message(-100, 99)
@@ -111,25 +133,33 @@ def test_rich_layout_nests_translated_reference_media_and_combines_footer():
         )
 
         assert built is not None
-        html = built.message.html
-        assert html.startswith("<blockquote>Отправитель: комментарий</blockquote><hr/>")
-        assert "Переведённый внешний твит" in html
-        assert "Original outer" not in html
-        reference_start = html.index("<blockquote>", html.index("<hr/>") + 1)
-        media_start = html.index('tg://photo?id=m0')
-        reference_end = html.index("</blockquote>", reference_start)
-        assert reference_start < media_start < reference_end
-        assert "Переведённый исходный твит" in html
-        assert "Original parent" not in html
-        assert html.count("<hr/>") == 2
-        assert "#twitter #post #outer | <i>Переведено с английского</i>" in html
-        assert built.message.media[0].media.media == parent_url
+        blocks = built.message.blocks
+        assert isinstance(blocks[0], InputRichBlockBlockQuotation)
+        assert _plain_rich_text(blocks[0].blocks[0].text) == "Отправитель: комментарий"
+        assert isinstance(blocks[1], InputRichBlockDivider)
+        assert _plain_rich_text(blocks[3].text) == "Переведённый внешний твит"
+        assert isinstance(blocks[4], InputRichBlockBlockQuotation)
+        assert _plain_rich_text(blocks[4].blocks[1].text) == "Переведённый исходный твит"
+        assert isinstance(blocks[4].blocks[2], InputRichBlockPhoto)
+        assert blocks[4].blocks[2].photo.media == parent_url
+        assert isinstance(blocks[5], InputRichBlockDivider)
+        assert isinstance(blocks[7], InputRichBlockFooter)
+        assert _plain_rich_text(blocks[7].text) == "#twitter #post #outer | Переведено с английского"
         assert built.cache_urls == ()
 
     asyncio.run(run())
 
 
-def test_rich_layout_separates_video_from_photo_collage():
+def test_rich_layout_combines_original_video_bytes_and_photos(monkeypatch):
+    original_video = b"original-video-bytes"
+
+    async def fake_download(url, max_bytes):
+        assert url.endswith("/video.mp4")
+        assert max_bytes == 50 * 1024 * 1024
+        return original_video
+
+    monkeypatch.setattr("src.rendering.twitter_rich.download_media", fake_download)
+
     async def run():
         video_url = "https://video.twimg.com/amplify_video/example/vid/avc1/1080x1920/video.mp4"
         photo_urls = [
@@ -151,11 +181,16 @@ def test_rich_layout_separates_video_from_photo_collage():
         built = await build_twitter_rich_message(None, None, tweet)
 
         assert built is not None
-        html = built.message.html
-        video = '<video src="tg://video?id=m0"></video>'
-        collage = '<tg-collage><img src="tg://photo?id=m1"/><img src="tg://photo?id=m2"/></tg-collage>'
-        assert f"{video}{collage}" in html
-        assert "<tg-collage><video" not in html
-        assert [item.media.media for item in built.message.media] == [video_url, *photo_urls]
+        collage = built.message.blocks[2]
+        assert isinstance(collage, InputRichBlockCollage)
+        assert [type(block) for block in collage.blocks] == [
+            InputRichBlockVideo,
+            InputRichBlockPhoto,
+            InputRichBlockPhoto,
+        ]
+        video = collage.blocks[0].video.media
+        assert isinstance(video, BufferedInputFile)
+        assert video.data == original_video
+        assert [block.photo.media for block in collage.blocks[1:]] == photo_urls
 
     asyncio.run(run())

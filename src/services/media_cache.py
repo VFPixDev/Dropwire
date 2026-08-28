@@ -1,22 +1,14 @@
-"""Transient Telegram file_id cache used by inline Rich Messages."""
+"""Telegram file_id cache populated from ordinary Rich Messages."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 import logging
-from urllib.parse import urlparse
-
-from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BufferedInputFile
 
 from src.services.database import Database
-from src.twitter.fetcher import _is_trusted_twitter_media_url, download_media, get_trusted_twitter_mp4_url
-from src.twitter.models import MediaItem
+from src.twitter.models import MediaItem, Tweet
 
 logger = logging.getLogger(__name__)
-_cache_upload_slots = asyncio.Semaphore(2)
-TELEGRAM_MULTIPART_MEDIA_MAX_BYTES = 50 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -30,139 +22,56 @@ class CachedMedia:
     duration: int | None = None
 
 
-async def cache_tweet_media(
-    bot,
-    database: Database,
-    items: list[MediaItem],
-    *,
-    staging_chat_id: int | None = None,
-) -> list[CachedMedia]:
-    if not items:
-        return []
-
-    results = await asyncio.gather(
-        *(_get_or_upload(bot, database, staging_chat_id, item) for item in items),
-        return_exceptions=True,
-    )
+async def cache_tweet_media(database: Database, items: list[MediaItem]) -> list[CachedMedia]:
     cached: list[CachedMedia] = []
-    for result in results:
-        if isinstance(result, CachedMedia):
-            cached.append(result)
-        elif isinstance(result, Exception):
-            logger.info("Не удалось подготовить inline-медиа: %s", type(result).__name__)
+    for item in items:
+        row = await database.get_cached_media(item.url)
+        if row is None:
+            return []
+        cached.append(_from_row(row))
     return cached
 
 
-async def _get_or_upload(bot, database: Database, chat_id: int | None, item: MediaItem) -> CachedMedia | None:
-    existing = await database.get_cached_media(item.url)
-    if existing is not None:
-        return _from_row(existing)
-    if chat_id is None:
-        return None
+async def remember_sent_rich_media(database: Database, tweet: Tweet, rich_message) -> None:
+    source_items = _all_media(tweet)
+    telegram_files = list(_iter_media_files(getattr(rich_message, "blocks", [])))
+    if len(source_items) != len(telegram_files):
+        logger.info("Rich media cache skipped: source=%s telegram=%s", len(source_items), len(telegram_files))
+        return
 
-    media_url = _trusted_media_url(item)
-    if media_url is None:
-        return None
-
-    async with _cache_upload_slots:
-        existing = await database.get_cached_media(item.url)
-        if existing is not None:
-            return _from_row(existing)
-        message = None
-        try:
-            if item.type == "photo":
-                message = await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=media_url,
-                    disable_notification=True,
-                    protect_content=True,
-                )
-                telegram_file = message.photo[-1] if message.photo else None
-            elif item.type == "animation":
-                upload = await _download_original_upload(media_url)
-                if upload is None:
-                    return None
-                message = await bot.send_animation(
-                    chat_id=chat_id,
-                    animation=upload,
-                    width=item.width,
-                    height=item.height,
-                    duration=item.duration,
-                    disable_notification=True,
-                    protect_content=True,
-                )
-                telegram_file = message.animation
-            else:
-                upload = await _download_original_upload(media_url)
-                if upload is None:
-                    return None
-                message = await bot.send_video(
-                    chat_id=chat_id,
-                    video=upload,
-                    width=item.width,
-                    height=item.height,
-                    duration=item.duration,
-                    supports_streaming=True,
-                    disable_notification=True,
-                    protect_content=True,
-                )
-                telegram_file = message.video
-        except TelegramAPIError as exc:
-            logger.info("Telegram отклонил временную inline-загрузку в ЛС пользователя: %s", exc)
-            return None
-        try:
-            if telegram_file is None:
-                return None
-            width = getattr(telegram_file, "width", None) or item.width
-            height = getattr(telegram_file, "height", None) or item.height
-            duration = getattr(telegram_file, "duration", None) or item.duration
-            await database.upsert_cached_media(
-                source_url=item.url,
-                media_type=item.type,
-                file_id=telegram_file.file_id,
-                file_unique_id=getattr(telegram_file, "file_unique_id", None),
-                width=width,
-                height=height,
-                duration=duration,
-            )
-            return CachedMedia(
-                source_url=item.url,
-                media_type=item.type,
-                file_id=telegram_file.file_id,
-                file_unique_id=getattr(telegram_file, "file_unique_id", None),
-                width=width,
-                height=height,
-                duration=duration,
-            )
-        finally:
-            if message is not None:
-                await _delete_staging_message(bot, chat_id, message.message_id)
+    for item, telegram_file in zip(source_items, telegram_files, strict=True):
+        await database.upsert_cached_media(
+            source_url=item.url,
+            media_type=item.type,
+            file_id=telegram_file.file_id,
+            file_unique_id=getattr(telegram_file, "file_unique_id", None),
+            width=getattr(telegram_file, "width", None) or item.width,
+            height=getattr(telegram_file, "height", None) or item.height,
+            duration=getattr(telegram_file, "duration", None) or item.duration,
+        )
 
 
-async def _delete_staging_message(bot, chat_id: int, message_id: int) -> None:
-    for attempt in range(3):
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=message_id)
-            return
-        except TelegramAPIError as exc:
-            if attempt == 2:
-                logger.error("Не удалось удалить временное inline-сообщение %s: %s", message_id, exc)
-                return
-            await asyncio.sleep(0.25 * (2**attempt))
+def _iter_media_files(blocks):
+    for block in blocks or []:
+        photos = getattr(block, "photo", None)
+        if isinstance(photos, list) and photos:
+            yield photos[-1]
+        for attribute in ("video", "animation"):
+            media = getattr(block, attribute, None)
+            if media is not None and getattr(media, "file_id", None):
+                yield media
+        nested = getattr(block, "blocks", None)
+        if nested:
+            yield from _iter_media_files(nested)
 
 
-async def _download_original_upload(media_url: str) -> BufferedInputFile | None:
-    content = await download_media(media_url, max_bytes=TELEGRAM_MULTIPART_MEDIA_MAX_BYTES)
-    if content is None:
-        return None
-    return BufferedInputFile(content, filename="twitter.mp4")
-
-
-def _trusted_media_url(item: MediaItem) -> str | None:
-    if item.type in {"video", "animation"}:
-        return get_trusted_twitter_mp4_url(item.url)
-    parsed = urlparse(item.url)
-    return item.url if _is_trusted_twitter_media_url(parsed) else None
+def _all_media(tweet: Tweet) -> list[MediaItem]:
+    items = list(tweet.media)
+    if tweet.quoted_tweet:
+        items.extend(tweet.quoted_tweet.media)
+    if tweet.parent_tweet:
+        items.extend(tweet.parent_tweet.media)
+    return items
 
 
 def _from_row(row) -> CachedMedia:

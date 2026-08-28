@@ -4,19 +4,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from html import escape
+from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 from aiogram.types import (
+    BufferedInputFile,
     InputMediaAnimation,
     InputMediaPhoto,
     InputMediaVideo,
-    InputRichMessage,
     InputRichMessageMedia,
+    InputRichBlockAnimation,
+    InputRichBlockBlockQuotation,
+    InputRichBlockCollage,
+    InputRichBlockDivider,
+    InputRichBlockFooter,
+    InputRichBlockParagraph,
+    InputRichBlockPhoto,
+    InputRichBlockVideo,
+    InputRichMessage,
+    RichTextBold,
+    RichTextCode,
+    RichTextItalic,
+    RichTextUrl,
 )
 
 from src.services.database import Database
 from src.services.media_cache import CachedMedia, cache_tweet_media
-from src.twitter.fetcher import _is_trusted_twitter_media_url, get_trusted_twitter_mp4_url
+from src.twitter.fetcher import _is_trusted_twitter_media_url, download_media, get_trusted_twitter_mp4_url
 from src.twitter.models import MediaItem, QuotedTweet, Tweet
 from src.utils.text_format import (
     clean_tweet_text,
@@ -48,41 +62,55 @@ async def build_twitter_rich_message(
     sender_quote: str = "",
     hashtags: str = "",
     inline: bool = False,
-    staging_chat_id: int | None = None,
 ) -> BuiltTwitterRichMessage | None:
     all_items = _all_media(tweet)
     if inline:
-        prepared = await _prepare_inline_media(bot, database, all_items, staging_chat_id)
+        prepared = await _prepare_inline_media(bot, database, all_items)
+        if prepared is None:
+            return None
+        return _build_inline_rich_message(tweet, prepared, all_items, sender_quote, hashtags)
     else:
-        prepared = _prepare_direct_media(all_items)
+        prepared = await _prepare_inline_media(bot, database, all_items) if database is not None else None
+        using_cache = prepared is not None
+        if prepared is None:
+            prepared = await _prepare_direct_media(all_items)
     if prepared is None:
         return None
 
-    attachments: list[InputRichMessageMedia] = []
     cursor = 0
 
-    def media_html(items: list[MediaItem]) -> str:
+    def media_block(items: list[MediaItem]):
         nonlocal cursor
         selected = prepared[cursor : cursor + len(items)]
         cursor += len(items)
-        refs: list[tuple[str, str]] = []
+        blocks = []
         for item in selected:
-            media_id = f"m{len(attachments)}"
-            attachments.append(InputRichMessageMedia(id=media_id, media=item.media))
-            source = f"tg://{_rich_media_scheme(item.media_type)}?id={media_id}"
-            tag = f'<img src="{source}"/>' if item.media_type == "photo" else f'<video src="{source}"></video>'
-            refs.append((item.media_type, tag))
-        return _media_blocks_html(refs)
+            if item.media_type == "photo":
+                blocks.append(InputRichBlockPhoto(photo=item.media))
+            elif item.media_type == "animation":
+                blocks.append(InputRichBlockAnimation(animation=item.media))
+            else:
+                blocks.append(InputRichBlockVideo(video=item.media))
+        if not blocks:
+            return None
+        return blocks[0] if len(blocks) == 1 else InputRichBlockCollage(blocks=blocks)
 
-    html_parts: list[str] = []
+    blocks = []
     if sender_quote:
-        html_parts.extend((sender_quote, "<hr/>"))
+        blocks.extend(
+            (
+                InputRichBlockBlockQuotation(blocks=[_paragraph_block(sender_quote)]),
+                InputRichBlockDivider(),
+            )
+        )
 
-    html_parts.append(_paragraph(_author_line(tweet)))
+    blocks.append(_paragraph_block(_author_line(tweet)))
     main_text = _formatted_text(translated_or_original_text(tweet))
     if main_text:
-        html_parts.append(_paragraph(main_text))
-    html_parts.append(media_html(tweet.media))
+        blocks.append(_paragraph_block(main_text))
+    main_media = media_block(tweet.media)
+    if main_media is not None:
+        blocks.append(main_media)
 
     seen_references: set[str] = set()
     for reference in (tweet.quoted_tweet, tweet.parent_tweet):
@@ -93,19 +121,89 @@ async def build_twitter_rich_message(
             cursor += len(reference.media)
             continue
         seen_references.add(identity)
-        html_parts.append(_reference_html(reference, media_html(reference.media)))
+        blocks.append(_reference_block(reference, media_block(reference.media)))
 
     if tweet.poll:
-        html_parts.append(_paragraph(_rich_text_html(format_poll(tweet.poll))))
+        blocks.append(_paragraph_block(_rich_text_html(format_poll(tweet.poll))))
 
-    html_parts.extend(("<hr/>", _paragraph(_stats_line(tweet))))
+    blocks.extend((InputRichBlockDivider(), _paragraph_block(_stats_line(tweet))))
     footer = format_tweet_footer(tweet, hashtags)
     if footer:
-        html_parts.append(f"<footer>{footer}</footer>")
+        blocks.append(InputRichBlockFooter(text=_rich_text_from_html(footer)))
 
     return BuiltTwitterRichMessage(
-        message=InputRichMessage(html="".join(part for part in html_parts if part), media=attachments or None),
-        cache_urls=tuple(item.url for item in all_items) if inline else (),
+        message=InputRichMessage(blocks=blocks),
+        cache_urls=tuple(item.url for item in all_items) if using_cache else (),
+    )
+
+
+def _build_inline_rich_message(
+    tweet: Tweet,
+    prepared: list[PreparedMedia],
+    all_items: list[MediaItem],
+    sender_quote: str,
+    hashtags: str,
+) -> BuiltTwitterRichMessage:
+    attachments: list[InputRichMessageMedia] = []
+    cursor = 0
+
+    def media_html(items: list[MediaItem]) -> str:
+        nonlocal cursor
+        selected = prepared[cursor : cursor + len(items)]
+        cursor += len(items)
+        tags = []
+        for item in selected:
+            media_id = f"m{len(attachments)}"
+            attachments.append(InputRichMessageMedia(id=media_id, media=item.media))
+            scheme = "photo" if item.media_type == "photo" else "video"
+            if item.media_type == "photo":
+                tags.append(f'<img src="tg://{scheme}?id={media_id}"/>')
+            else:
+                tags.append(f'<video src="tg://{scheme}?id={media_id}"></video>')
+        if not tags:
+            return ""
+        return tags[0] if len(tags) == 1 else f"<tg-collage>{''.join(tags)}</tg-collage>"
+
+    parts = []
+    if sender_quote:
+        parts.extend((sender_quote, "<hr/>"))
+
+    parts.append(f"<p>{_author_line(tweet)}</p>")
+    main_text = _formatted_text(translated_or_original_text(tweet))
+    if main_text:
+        parts.append(f"<p>{main_text}</p>")
+    main_media = media_html(tweet.media)
+    if main_media:
+        parts.append(main_media)
+
+    seen_references: set[str] = set()
+    for reference in (tweet.quoted_tweet, tweet.parent_tweet):
+        if reference is None:
+            continue
+        identity = reference.tweet_id or reference.url
+        if identity in seen_references:
+            cursor += len(reference.media)
+            continue
+        seen_references.add(identity)
+        reference_parts = [f"<p>{_author_line(reference)}</p>"]
+        reference_text = _formatted_text(translated_or_original_text(reference))
+        if reference_text:
+            reference_parts.append(f"<p>{reference_text}</p>")
+        reference_media = media_html(reference.media)
+        if reference_media:
+            reference_parts.append(reference_media)
+        parts.append(f"<blockquote>{''.join(reference_parts)}</blockquote>")
+
+    if tweet.poll:
+        parts.append(f"<p>{_rich_text_html(format_poll(tweet.poll))}</p>")
+    parts.extend(("<hr/>", f"<p>{_stats_line(tweet)}</p>"))
+    footer = format_tweet_footer(tweet, hashtags)
+    if footer:
+        parts.append(f"<footer>{footer}</footer>")
+
+    return BuiltTwitterRichMessage(
+        message=InputRichMessage(html="".join(parts), media=attachments or None),
+        cache_urls=tuple(item.url for item in all_items),
     )
 
 
@@ -113,40 +211,45 @@ async def _prepare_inline_media(
     bot,
     database: Database | None,
     items: list[MediaItem],
-    staging_chat_id: int | None,
 ) -> list[PreparedMedia] | None:
     if not items:
         return []
     if database is None:
         return None
-    cached = await cache_tweet_media(bot, database, items, staging_chat_id=staging_chat_id)
+    cached = await cache_tweet_media(database, items)
     if len(cached) != len(items):
         return None
     return [PreparedMedia(item.media_type, _cached_input_media(item)) for item in cached]
 
 
-def _prepare_direct_media(items: list[MediaItem]) -> list[PreparedMedia] | None:
+async def _prepare_direct_media(items: list[MediaItem]) -> list[PreparedMedia] | None:
     prepared: list[PreparedMedia] = []
-    for item in items:
+    for index, item in enumerate(items):
         media_url = _trusted_media_url(item)
         if media_url is None:
             return None
-        prepared.append(PreparedMedia(item.type, _direct_input_media(item, media_url)))
+        media_source: str | BufferedInputFile = media_url
+        if item.type in {"video", "animation"}:
+            content = await download_media(media_url, max_bytes=50 * 1024 * 1024)
+            if content is None:
+                return None
+            media_source = BufferedInputFile(content, filename=f"twitter_{index}.mp4")
+        prepared.append(PreparedMedia(item.type, _direct_input_media(item, media_source)))
     return prepared
 
 
-def _direct_input_media(item: MediaItem, media_url: str):
+def _direct_input_media(item: MediaItem, media_source: str | BufferedInputFile):
     if item.type == "photo":
-        return InputMediaPhoto(media=media_url)
+        return InputMediaPhoto(media=media_source)
     if item.type == "animation":
         return InputMediaAnimation(
-            media=media_url,
+            media=media_source,
             width=item.width,
             height=item.height,
             duration=item.duration,
         )
     return InputMediaVideo(
-        media=media_url,
+        media=media_source,
         width=item.width,
         height=item.height,
         duration=item.duration,
@@ -188,14 +291,14 @@ def _all_media(tweet: Tweet) -> list[MediaItem]:
     return items
 
 
-def _reference_html(reference: QuotedTweet, media_html: str) -> str:
-    parts = [_paragraph(_author_line(reference))]
+def _reference_block(reference: QuotedTweet, media_block):
+    blocks = [_paragraph_block(_author_line(reference))]
     text = _formatted_text(translated_or_original_text(reference))
     if text:
-        parts.append(_paragraph(text))
-    if media_html:
-        parts.append(media_html)
-    return f"<blockquote>{''.join(parts)}</blockquote>"
+        blocks.append(_paragraph_block(text))
+    if media_block is not None:
+        blocks.append(media_block)
+    return InputRichBlockBlockQuotation(blocks=blocks)
 
 
 def _author_line(item: Tweet | QuotedTweet) -> str:
@@ -223,33 +326,82 @@ def _formatted_text(text: str) -> str:
     return _rich_text_html(clean_tweet_text(text))
 
 
-def _paragraph(content: str) -> str:
-    return f"<p>{content}</p>"
-
-
-def _rich_media_scheme(media_type: str) -> str:
-    return "photo" if media_type == "photo" else "video"
-
-
-def _media_blocks_html(refs: list[tuple[str, str]]) -> str:
-    blocks: list[str] = []
-    photos: list[str] = []
-
-    def flush_photos() -> None:
-        if not photos:
-            return
-        blocks.append(photos[0] if len(photos) == 1 else f"<tg-collage>{''.join(photos)}</tg-collage>")
-        photos.clear()
-
-    for media_type, tag in refs:
-        if media_type == "photo":
-            photos.append(tag)
-            continue
-        flush_photos()
-        blocks.append(tag)
-    flush_photos()
-    return "".join(blocks)
+def _paragraph_block(content: str):
+    return InputRichBlockParagraph(text=_rich_text_from_html(content))
 
 
 def _rich_text_html(text: str) -> str:
     return text.replace("\n", "<br>")
+
+
+class _RichTextParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = [("root", {}, [])]
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag == "br":
+            self.stack[-1][2].append("\n")
+            return
+        self.stack.append((tag, dict(attrs), []))
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        if tag == "br":
+            self.stack[-1][2].append("\n")
+            return
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        while len(self.stack) > 1:
+            current_tag, attrs, parts = self.stack.pop()
+            rendered = _wrap_rich_text(current_tag, attrs, parts)
+            if rendered != "":
+                self.stack[-1][2].append(rendered)
+            if current_tag == tag:
+                break
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.stack[-1][2].append(data)
+
+    def result(self):
+        while len(self.stack) > 1:
+            self.handle_endtag(self.stack[-1][0])
+        return _compact_rich_text(self.stack[0][2])
+
+
+def _rich_text_from_html(content: str):
+    parser = _RichTextParser()
+    parser.feed(content)
+    parser.close()
+    return parser.result()
+
+
+def _wrap_rich_text(tag: str, attrs: dict[str, str | None], parts: list):
+    text = _compact_rich_text(parts)
+    if text == "":
+        return ""
+    if tag == "a" and attrs.get("href"):
+        return RichTextUrl(text=text, url=str(attrs["href"]))
+    if tag in {"b", "strong"}:
+        return RichTextBold(text=text)
+    if tag in {"i", "em"}:
+        return RichTextItalic(text=text)
+    if tag == "code":
+        return RichTextCode(text=text)
+    return text
+
+
+def _compact_rich_text(parts: list):
+    compact = []
+    for part in parts:
+        if part == "":
+            continue
+        if isinstance(part, str) and compact and isinstance(compact[-1], str):
+            compact[-1] += part
+        else:
+            compact.append(part)
+    if not compact:
+        return ""
+    return compact[0] if len(compact) == 1 else compact

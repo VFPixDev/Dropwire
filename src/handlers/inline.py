@@ -36,11 +36,9 @@ from src.rendering.twitter_rich import build_twitter_rich_message
 from src.services.database import Database
 from src.services.providers import is_provider_enabled
 from src.services.settings import EffectiveSettings, get_effective_settings, get_translation_language, is_user_allowed
-from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html, get_trusted_twitter_mp4_url
+from src.twitter.fetcher import get_trusted_twitter_mp4_url
+from src.twitter.loader import fetch_complete_tweet
 from src.twitter.normalize import extract_tweet_id, extract_username, normalize_url
-from src.twitter.parser import parse_tweet_html
-from src.twitter.parser_api import parse_tweet_api
-from src.twitter.reference_translation import hydrate_reference_translations
 from src.twitter.models import Tweet
 from src.utils.sender_quote import format_sender_quote
 from src.utils.text_format import format_tweet_card, format_tweet_footer, has_tweet_translation
@@ -152,7 +150,6 @@ async def _build_inline_result(
             settings,
             sender_quote=sender_quote,
             hashtags=hashtags,
-            staging_chat_id=user.id,
         )
         if rich_result is not None:
             return rich_result
@@ -190,16 +187,7 @@ async def _fetch_tweet(url: str, language: str | None):
     if not tweet_id or not username:
         return None
 
-    data = await fetch_tweet_data(tweet_id, username, language)
-    tweet = parse_tweet_api(data, normalized_url) if data else None
-    if tweet is None or (language and not tweet.translated_text):
-        html = await fetch_tweet_html(tweet_id, username, language)
-        html_tweet = parse_tweet_html(html, normalized_url) if html else None
-        if html_tweet is not None:
-            tweet = html_tweet
-    if tweet is not None:
-        await hydrate_reference_translations(tweet, language)
-    return tweet
+    return await fetch_complete_tweet(normalized_url, tweet_id, username, language)
 
 
 def _build_result(
@@ -331,7 +319,6 @@ async def _build_rich_twitter_result(
     settings: EffectiveSettings,
     sender_quote: str = "",
     hashtags: str = "",
-    staging_chat_id: int | None = None,
 ) -> BuiltInlineResult | None:
     rich = await build_twitter_rich_message(
         update.get_bot(),
@@ -340,7 +327,6 @@ async def _build_rich_twitter_result(
         sender_quote=sender_quote,
         hashtags=hashtags,
         inline=True,
-        staging_chat_id=staging_chat_id,
     )
     if rich is None:
         return None
@@ -348,7 +334,7 @@ async def _build_rich_twitter_result(
     safe_title = _single_line(title, 120) or _source_title(link.source)
     safe_description = _single_line(description, 180)
     fallback = _build_twitter_result(link, tweet, title, description, text, preview_url, keyboard, settings).fallback
-    result_key = sha256(f"rich:{link.url}:{text}".encode("utf-8")).hexdigest()[:32]
+    result_key = sha256(f"rich-v2:{link.url}:{text}".encode("utf-8")).hexdigest()[:32]
     article = InlineQueryResultArticle(
         id=f"r{result_key}",
         title=safe_title,

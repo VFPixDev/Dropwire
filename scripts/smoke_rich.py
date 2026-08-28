@@ -1,93 +1,70 @@
-"""Live validation of Telegram Rich Messages without a cache channel."""
+"""Live validation of a mixed-media Telegram Rich Message."""
 
 import asyncio
-from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.config import config
-from src.handlers.inline import _build_rich_twitter_result
-from src.providers.link_router import LinkMatch
+from src.rendering.twitter_rich import build_twitter_rich_message
 from src.services.database import Database
-from src.services.settings import EffectiveSettings
-from src.telegram_runtime import BotAdapter, Update
-from src.twitter.models import MediaItem, Tweet
-
-TEST_MEDIA = [
-    MediaItem(
-        type="video",
-        url="https://video.twimg.com/amplify_video/2092881459765772288/vid/avc1/1080x1920/X4QGDads6kz9Rejj.mp4?tag=29",
-        width=1080,
-        height=1920,
-        duration=74,
-    ),
-    MediaItem(type="photo", url="https://pbs.twimg.com/media/HQtomVVWUAAZWWx.jpg?name=orig"),
-    MediaItem(type="photo", url="https://pbs.twimg.com/media/HQtomWNWAAA6GNO.jpg?name=orig"),
-]
+from src.services.media_cache import cache_tweet_media, remember_sent_rich_media
+from src.twitter.loader import fetch_complete_tweet
 
 
-def _settings() -> EffectiveSettings:
-    return EffectiveSettings(
-        reply_in_groups=True,
-        remove_message_in_groups=False,
-        reply_to_message=False,
-        caption_above_media=True,
-        enable_hashtags=True,
-        include_sender_quote=False,
-        sender_quote_mode="name",
-    )
+def _count_media_blocks(blocks) -> int:
+    count = 0
+    for block in blocks or []:
+        if any(getattr(block, field, None) is not None for field in ("photo", "video", "animation")):
+            count += 1
+        count += _count_media_blocks(getattr(block, "blocks", None))
+    return count
 
 
 async def main() -> int:
-    raw_bot = Bot(config.BOT_TOKEN)
-    bot = BotAdapter(raw_bot)
-    database = Database(config.DATABASE_PATH)
-    await database.connect()
+    bot = Bot(config.BOT_TOKEN)
     try:
-        await database.init_schema()
         if not config.BOT_ADMIN_IDS:
             print("rich: skipped (BOT_ADMIN_IDS is empty)")
             return 0
         chat_id = config.BOT_ADMIN_IDS[0]
-        link = LinkMatch("twitter", "https://x.com/Dropwire/status/1", 0)
-        tweet = Tweet(
-            display_name="Dropwire smoke",
-            username="Dropwire",
-            url=link.url,
-            text="Mixed video and photo Rich Message validation",
-            date=datetime.now(),
-            media=TEST_MEDIA,
-        )
-        await database.delete_cached_media([item.url for item in tweet.media])
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Open original", url=link.url)]]
-        )
-        built = await _build_rich_twitter_result(
-            Update(update_id=0, bot=bot),
-            database,
-            link,
-            tweet,
-            "Dropwire Rich Message",
-            "Live mixed-media validation",
-            "Text above media",
-            tweet.media[0].url,
-            keyboard,
-            _settings(),
-            staging_chat_id=chat_id,
-        )
-        if built is None:
-            print("rich: failed (DM staging or Rich media preparation failed)")
+        url = "https://x.com/ogivus/status/2092881563969007632"
+        tweet = await fetch_complete_tweet(url, "2092881563969007632", "ogivus", "ru")
+        if tweet is None:
+            print("rich: failed (tweet fetch failed)")
             return 1
-        rich_message = built.primary.input_message_content.rich_message
-        sent = await raw_bot.send_rich_message(chat_id=chat_id, rich_message=rich_message, reply_markup=keyboard)
-        await raw_bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-        attachments = len(rich_message.media or [])
-        print(f"rich: ok (attachments={attachments})")
-        return 0 if attachments == 3 else 1
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Open original", url=url)]]
+        )
+        built = await build_twitter_rich_message(bot, None, tweet)
+        if built is None:
+            print("rich: failed (media preparation failed)")
+            return 1
+        sent = await bot.send_rich_message(
+            chat_id=chat_id,
+            rich_message=built.message,
+            reply_markup=keyboard,
+        )
+        try:
+            requested_media = _count_media_blocks(built.message.blocks)
+            returned_media = _count_media_blocks(sent.rich_message.blocks)
+            with TemporaryDirectory() as temp_dir:
+                database = Database(str(Path(temp_dir) / "smoke.sqlite3"))
+                await database.connect()
+                try:
+                    await database.init_schema()
+                    await remember_sent_rich_media(database, tweet, sent.rich_message)
+                    cached = await cache_tweet_media(database, tweet.media)
+                finally:
+                    await database.close()
+        finally:
+            await bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+        print(f"rich: ok (requested={requested_media}, returned={returned_media}, cached={len(cached)})")
+        return 0 if requested_media == returned_media == len(cached) == 3 else 1
     finally:
-        await database.close()
-        await raw_bot.session.close()
+        await bot.session.close()
 
 
 if __name__ == "__main__":

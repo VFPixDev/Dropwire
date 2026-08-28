@@ -40,7 +40,7 @@ The release image is published as `ghcr.io/vfpixdev/dropwire`. For a private pac
 docker login ghcr.io
 cp .env.example .env
 # Set BOT_TOKEN, BOT_ADMIN_IDS and YOUTUBE_API_KEY.
-DROPWIRE_IMAGE=ghcr.io/vfpixdev/dropwire:1.1.0 docker compose up -d
+DROPWIRE_IMAGE=ghcr.io/vfpixdev/dropwire:1.2.0 docker compose up -d
 docker compose ps
 ```
 
@@ -58,9 +58,9 @@ Enable inline mode once in `@BotFather`: run `/setinline`, select `@dropwire_bot
 
 ### Inline Twitter media
 
-Rich inline messages can reuse only media already uploaded to Telegram. Dropwire obtains the required `file_id` without a technical channel: on the first inline request for a media file, the bot silently stages it in the requester's DM, immediately deletes the staging message, and stores only the reusable identifier and technical dimensions in SQLite.
+Rich inline messages can reuse only media already uploaded to Telegram. Dropwire obtains the required `file_id` from ordinary Twitter cards that Telegram has already delivered and stores only the reusable identifier and technical dimensions in SQLite. It never sends technical staging messages to users or to a cache channel.
 
-The requester must have opened the bot and pressed `/start` at least once. If Telegram does not allow the bot to write to that DM or rejects a media file, Dropwire automatically returns its compact inline fallback. Ordinary private and group cards upload trusted Twitter media URLs directly and do not use staging.
+If an inline request references media that has not been delivered by the bot before, Dropwire returns its compact inline fallback. Once the same media has appeared in an ordinary private or group card, future inline results can reuse it in a Rich Message collage.
 
 The web service is exposed on `http://localhost:8080` by default. YouTube browser links stay disabled until `WEB_BASE_URL` is a public HTTPS address that reaches this service.
 

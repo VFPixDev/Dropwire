@@ -11,6 +11,7 @@
 .venv/Scripts/pip-audit -r requirements.txt
 docker compose config --quiet
 docker build -t dropwire:local .
+docker scout cves dropwire:local --only-severity critical,high
 ```
 
 Live provider and conversion checks use public sample links and never print credentials:
@@ -38,8 +39,8 @@ The same static, test, audit and container-build checks run in GitHub Actions on
 10. Open the signed link on iPhone Safari, download it, seek in the video and open it in the native player.
 11. Open `/downloads` and verify a fresh link can be issued while the retained file exists.
 12. Inspect `docker compose logs --tail 200`; there should be no tracebacks, leaked secrets or restart loop.
-13. Open `/start`, then type `@dropwire_bot <public link>` in another chat. On the first request for uncached media, verify that no temporary media message remains in the bot DM.
-14. Verify a multi-photo Twitter post becomes one Rich Message with text above the collage and the original button below the same message.
+13. Type `@dropwire_bot <public link>` in another chat. On the first request for uncached media, verify that no temporary message is created in the bot DM and the compact fallback remains usable.
+14. After sending the same Twitter post to the bot normally, repeat the inline request and verify video plus photos appear in one Rich Message collage with the original button below it.
 15. Verify a quoted post and a reply include the referenced post text and media inside one quotation block, with exactly one visual interval for a media-only post.
 16. Verify a Twitter GIF plays as an animation and a normal video keeps its original aspect ratio.
 17. In a group, reply `/del` to a card as its requester and verify the whole card/album is deleted while the original link remains. Verify another regular member cannot delete it and a group administrator can.
@@ -47,7 +48,7 @@ The same static, test, audit and container-build checks run in GitHub Actions on
 ## Expected Limitations
 
 - Twitter currently uses FxTwitter and automatically falls back from its JSON endpoint to HTML when necessary.
-- The user must start the bot once before Dropwire can stage uncached media for a Rich inline collage. If Telegram blocks the staging DM, the compact inline card remains available.
+- An uncached inline Twitter result uses the compact card and must not create any message in the user's DM. After the same media is delivered in an ordinary Rich Message, inline mode can reuse its cached Telegram file identifiers.
 - Spotify author and duration require optional Spotify API credentials; basic cards do not.
 - SoundCloud oEmbed does not always provide duration.
 - Mobile downloads require a public HTTPS `WEB_BASE_URL`; `localhost` works only on the Docker host.

@@ -17,11 +17,9 @@ from src.rendering.hashtags import build_hashtags, render_hashtags
 from src.rendering.telegram_cards import build_card_keyboard, format_card_text
 from src.rendering.twitter_rich import build_twitter_rich_message
 from src.twitter.normalize import normalize_url, extract_tweet_id, extract_username
-from src.twitter.fetcher import fetch_tweet_data, fetch_tweet_html
-from src.twitter.parser import parse_tweet_html
-from src.twitter.parser_api import parse_tweet_api
-from src.twitter.reference_translation import hydrate_reference_translations
+from src.twitter.loader import fetch_complete_tweet
 from src.services.database import Database
+from src.services.media_cache import remember_sent_rich_media
 from src.services.settings import (
     EffectiveSettings,
     get_effective_settings,
@@ -157,9 +155,15 @@ async def _try_send_rich_tweet_card(
             reply_markup=get_tweet_url_keyboard(tweet.url),
             **telegram_timeout_kwargs(),
         )
+        if database is not None and getattr(sent, "rich_message", None) is not None:
+            try:
+                await remember_sent_rich_media(database, tweet, sent.rich_message)
+            except Exception:
+                logger.warning("Не удалось сохранить Telegram file_id из Rich Message", exc_info=True)
     except BadRequest as exc:
         logger.info("Telegram отклонил Rich Message, используется media fallback: %s", exc)
-        await database.delete_cached_media(list(rich.cache_urls))
+        if database is not None and rich.cache_urls:
+            await database.delete_cached_media(list(rich.cache_urls))
         return None
 
     await _record_delivery(update, context, sent)
@@ -452,30 +456,7 @@ async def process_tweet_url(
     # Получаем данные твита
     logger.info(f"Обработка твита: {tweet_id} (язык: {lang_code or 'нет'})")
 
-    # Сначала пробуем структурированный API, HTML оставляем как fallback.
-    tweet = None
-    api_data = await fetch_tweet_data(tweet_id, username, lang_code)
-    if api_data:
-        tweet = parse_tweet_api(api_data, normalized_url)
-
-    needs_html_fallback = tweet is None or (lang_code and not tweet.translated_text)
-    if needs_html_fallback:
-        html = await fetch_tweet_html(tweet_id, username, lang_code)
-
-        if not html:
-            if tweet is None:
-                await send_text_message(
-                    update,
-                    context,
-                    f"❌ Твит недоступен (возможно приватный, удалён или 18+): {original_url}",
-                    thread_id=thread_id,
-                    settings=settings,
-                )
-                return False
-        else:
-            html_tweet = parse_tweet_html(html, normalized_url)
-            if html_tweet:
-                tweet = html_tweet
+    tweet = await fetch_complete_tweet(normalized_url, tweet_id, username, lang_code)
 
     if not tweet:
         await send_text_message(
@@ -490,7 +471,6 @@ async def process_tweet_url(
     # Если перевод не получен, но запрошен
     if lang_code and not tweet.translated_text:
         logger.info("Перевод не получен от источника")
-    await hydrate_reference_translations(tweet, lang_code)
 
     # Отправляем карточку
     try:
