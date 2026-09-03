@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from dataclasses import dataclass
 from hashlib import sha256
 from html import escape
 import logging
 import re
+import time
 from urllib.parse import parse_qs, urlparse
 
 from aiogram.types import (
@@ -33,6 +35,7 @@ from src.providers.youtube import fetch_youtube_card
 from src.rendering.hashtags import build_hashtags, render_hashtags
 from src.rendering.telegram_cards import format_card_text
 from src.rendering.twitter_rich import build_twitter_rich_message
+from src.rendering.youtube_rich import build_youtube_rich_message
 from src.services.database import Database
 from src.services.providers import is_provider_enabled
 from src.services.settings import EffectiveSettings, get_effective_settings, get_translation_language, is_user_allowed
@@ -45,9 +48,14 @@ from src.utils.text_format import format_tweet_card, format_tweet_footer, has_tw
 
 logger = logging.getLogger(__name__)
 
-INLINE_FETCH_TIMEOUT_SECONDS = 8
+INLINE_FETCH_TIMEOUT_SECONDS = 7
 INLINE_CACHE_SECONDS = 60
+INLINE_TWEET_CACHE_SECONDS = 300
+INLINE_TWEET_FAILURE_CACHE_SECONDS = 15
+INLINE_TWEET_CACHE_SIZE = 128
 _inline_fetch_slots = asyncio.Semaphore(4)
+_tweet_cache: OrderedDict[str, tuple[float, Tweet | None]] = OrderedDict()
+_tweet_fetch_tasks: dict[str, asyncio.Task[Tweet | None]] = {}
 
 
 @dataclass(frozen=True)
@@ -87,16 +95,31 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             async with _inline_fetch_slots:
                 built = await _build_inline_result(update, database, link, settings, user, comment)
     except TimeoutError:
-        logger.info("Inline timeout user_id=%s source=%s", user.id, link.source)
-        await _answer_inline(query, [], cache_time=1)
+        logger.info("Inline preparation continues in background user_id=%s source=%s", user.id, link.source)
+        pending = _build_status_result(
+            link,
+            "⏳ Подготавливаю карточку",
+            "Медиа загружается в Telegram. Повторите запрос через несколько секунд.",
+        )
+        await _answer_inline(query, [pending.primary], cache_time=0)
         return
     except Exception as exc:
         logger.warning("Inline fetch failed user_id=%s source=%s error=%s", user.id, link.source, type(exc).__name__)
-        await _answer_inline(query, [], cache_time=1)
+        failed = _build_status_result(
+            link,
+            "Не удалось подготовить карточку",
+            "Проверьте ссылку или повторите запрос позже.",
+        )
+        await _answer_inline(query, [failed.primary], cache_time=1)
         return
 
     if built is None:
-        await _answer_inline(query, [], cache_time=5)
+        failed = _build_status_result(
+            link,
+            "Не удалось получить публикацию",
+            "Проверьте доступность ссылки.",
+        )
+        await _answer_inline(query, [failed.primary], cache_time=1)
         return
 
     try:
@@ -153,7 +176,11 @@ async def _build_inline_result(
         )
         if rich_result is not None:
             return rich_result
-        return _build_twitter_result(link, tweet, title, description, text, preview_url, keyboard, settings)
+
+        # Keep the inline picker compact even when Telegram media preparation
+        # is unavailable. The next query will use the background-populated cache.
+        fallback = _build_twitter_result(link, tweet, title, description, text, preview_url, keyboard, settings)
+        return BuiltInlineResult(primary=fallback.fallback, fallback=fallback.fallback)
 
     card = await _fetch_media_card(link)
     if card is None:
@@ -165,6 +192,29 @@ async def _build_inline_result(
     title = card.title or _source_title(card.source)
     description = _card_description(card)
     keyboard = _url_only_keyboard(card)
+    if card.source == "youtube":
+        sender_quote = format_sender_quote(user, comment, settings.sender_quote_mode) if settings.include_sender_quote else ""
+        hashtags = render_hashtags(card.hashtags)
+        rich_result = await _build_rich_youtube_result(
+            update,
+            database,
+            link,
+            card,
+            title,
+            description,
+            text,
+            card.thumbnail_url,
+            keyboard,
+            settings,
+            sender_quote=sender_quote,
+            hashtags=hashtags,
+        )
+        if rich_result is not None:
+            return rich_result
+
+        fallback = _build_result(link, title, description, text, card.thumbnail_url, keyboard, settings).fallback
+        return BuiltInlineResult(primary=fallback, fallback=fallback)
+
     return _build_result(link, title, description, text, card.thumbnail_url, keyboard, settings)
 
 
@@ -178,7 +228,7 @@ async def _fetch_media_card(link: LinkMatch) -> MediaCard | None:
     return None
 
 
-async def _fetch_tweet(url: str, language: str | None):
+async def _fetch_tweet(url: str, language: str | None) -> Tweet | None:
     normalized_url = normalize_url(url)
     if not normalized_url:
         return None
@@ -187,7 +237,67 @@ async def _fetch_tweet(url: str, language: str | None):
     if not tweet_id or not username:
         return None
 
-    return await fetch_complete_tweet(normalized_url, tweet_id, username, language)
+    key = f"{tweet_id}:{language or '-'}"
+    now = time.monotonic()
+    cached = _tweet_cache.get(key)
+    if cached is not None:
+        expires_at, tweet = cached
+        if expires_at > now:
+            _tweet_cache.move_to_end(key)
+            return tweet
+        _tweet_cache.pop(key, None)
+
+    task = _tweet_fetch_tasks.get(key)
+    if task is None:
+        task = asyncio.create_task(
+            _load_and_cache_tweet(key, normalized_url, tweet_id, username, language),
+            name=f"inline-tweet-{tweet_id}",
+        )
+        _tweet_fetch_tasks[key] = task
+    return await asyncio.shield(task)
+
+
+async def _load_and_cache_tweet(
+    key: str,
+    normalized_url: str,
+    tweet_id: str,
+    username: str,
+    language: str | None,
+) -> Tweet | None:
+    try:
+        try:
+            tweet = await fetch_complete_tweet(normalized_url, tweet_id, username, language)
+        except Exception:
+            logger.warning("Background inline tweet fetch failed tweet_id=%s", tweet_id, exc_info=True)
+            tweet = None
+
+        ttl = INLINE_TWEET_CACHE_SECONDS if tweet is not None else INLINE_TWEET_FAILURE_CACHE_SECONDS
+        _tweet_cache[key] = (time.monotonic() + ttl, tweet)
+        _tweet_cache.move_to_end(key)
+        while len(_tweet_cache) > INLINE_TWEET_CACHE_SIZE:
+            _tweet_cache.popitem(last=False)
+        return tweet
+    finally:
+        current = asyncio.current_task()
+        if _tweet_fetch_tasks.get(key) is current:
+            _tweet_fetch_tasks.pop(key, None)
+
+
+def _build_status_result(link: LinkMatch, title: str, description: str) -> BuiltInlineResult:
+    result_key = sha256(f"status:{title}:{link.url}".encode("utf-8")).hexdigest()[:32]
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Открыть оригинал", url=link.url)]])
+    article = InlineQueryResultArticle(
+        id=f"s{result_key}",
+        title=title,
+        description=description,
+        input_message_content=InputTextMessageContent(
+            message_text=f"<b>{escape(title)}</b>\n\n{escape(link.url)}",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        ),
+        reply_markup=keyboard,
+    )
+    return BuiltInlineResult(primary=article, fallback=article)
 
 
 def _build_result(
@@ -343,6 +453,50 @@ async def _build_rich_twitter_result(
         input_message_content=InputRichMessageContent(
             rich_message=rich.message
         ),
+        reply_markup=keyboard,
+    )
+    return BuiltInlineResult(
+        primary=article,
+        fallback=fallback,
+        cache_urls=rich.cache_urls,
+    )
+
+
+async def _build_rich_youtube_result(
+    update: Update,
+    database: Database | None,
+    link: LinkMatch,
+    card: MediaCard,
+    title: str,
+    description: str,
+    text: str,
+    preview_url: str | None,
+    keyboard: InlineKeyboardMarkup | None,
+    settings: EffectiveSettings,
+    sender_quote: str = "",
+    hashtags: str = "",
+) -> BuiltInlineResult | None:
+    rich = await build_youtube_rich_message(
+        update.get_bot(),
+        database,
+        card,
+        sender_quote=sender_quote,
+        hashtags=hashtags,
+        inline=True,
+    )
+    if rich is None:
+        return None
+
+    safe_title = _single_line(title, 120) or _source_title(link.source)
+    safe_description = _single_line(description, 180)
+    fallback = _build_result(link, title, description, text, preview_url, keyboard, settings).fallback
+    result_key = sha256(f"youtube-rich-v1:{link.url}:{text}".encode("utf-8")).hexdigest()[:32]
+    article = InlineQueryResultArticle(
+        id=f"y{result_key}",
+        title=safe_title,
+        description=safe_description,
+        thumbnail_url=preview_url,
+        input_message_content=InputRichMessageContent(rich_message=rich.message),
         reply_markup=keyboard,
     )
     return BuiltInlineResult(

@@ -4,7 +4,8 @@
 
 - Twitter/X, YouTube, Spotify and SoundCloud cards.
 - Aiogram 3.31 runtime with Telegram Bot API 10.3 Rich Messages.
-- Twitter inline collages, GIF animations, quoted posts and replies with reusable Telegram file identifiers learned from ordinary Rich Messages.
+- Twitter inline collages, GIF animations, quoted posts and replies with reusable Telegram file identifiers obtained through a transient technical cache channel.
+- YouTube Rich Message cards with full-size artwork, linked channel, publication date, compact statistics and one-row actions.
 - Group `/del` ownership and administrator checks for removing complete generated cards.
 - Owner-only global settings, administrator-managed group settings and per-user translation in groups.
 - Owner panel and provider switches.

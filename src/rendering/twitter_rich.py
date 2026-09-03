@@ -216,7 +216,7 @@ async def _prepare_inline_media(
         return []
     if database is None:
         return None
-    cached = await cache_tweet_media(database, items)
+    cached = await cache_tweet_media(bot, database, items)
     if len(cached) != len(items):
         return None
     return [PreparedMedia(item.media_type, _cached_input_media(item)) for item in cached]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -16,6 +17,7 @@ from src.providers.soundcloud import fetch_soundcloud_card
 from src.rendering.hashtags import build_hashtags, render_hashtags
 from src.rendering.telegram_cards import build_card_keyboard, format_card_text
 from src.rendering.twitter_rich import build_twitter_rich_message
+from src.rendering.youtube_rich import build_youtube_rich_message
 from src.twitter.normalize import normalize_url, extract_tweet_id, extract_username
 from src.twitter.loader import fetch_complete_tweet
 from src.services.database import Database
@@ -36,6 +38,7 @@ from src.media.compress import compress_image, compress_video
 from src.media.cleanup import delete_files
 
 logger = logging.getLogger(__name__)
+_processing_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
 
 def get_reply_to_message_id(update: Update, settings: Optional[EffectiveSettings] = None) -> int | None:
@@ -162,6 +165,52 @@ async def _try_send_rich_tweet_card(
                 logger.warning("Не удалось сохранить Telegram file_id из Rich Message", exc_info=True)
     except BadRequest as exc:
         logger.info("Telegram отклонил Rich Message, используется media fallback: %s", exc)
+        if database is not None and rich.cache_urls:
+            await database.delete_cached_media(list(rich.cache_urls))
+        return None
+
+    await _record_delivery(update, context, sent)
+    return sent
+
+
+async def _try_send_rich_youtube_card(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    card,
+    thread_id: int | None,
+    settings: EffectiveSettings | None,
+    user_comment: str | None,
+):
+    database_value = context.application.bot_data.get("database")
+    database = database_value if isinstance(database_value, Database) else None
+    if update.effective_chat is None:
+        return None
+
+    sender_quote = build_sender_quote_prefix(update, user_comment, settings)
+    hashtags = render_hashtags(card.hashtags)
+    rich = await build_youtube_rich_message(
+        context.bot,
+        database,
+        card,
+        sender_quote=sender_quote,
+        hashtags=hashtags,
+    )
+    if rich is None:
+        return None
+
+    reply_to_message_id = get_reply_to_message_id(update, settings)
+    reply_parameters = ReplyParameters(message_id=reply_to_message_id) if reply_to_message_id else None
+    try:
+        sent = await context.bot.send_rich_message(
+            chat_id=update.effective_chat.id,
+            rich_message=rich.message,
+            message_thread_id=thread_id,
+            reply_parameters=reply_parameters,
+            reply_markup=build_card_keyboard(card),
+            **telegram_timeout_kwargs(),
+        )
+    except BadRequest as exc:
+        logger.info("Telegram отклонил YouTube Rich Message, используется fallback: %s", exc)
         if database is not None and rich.cache_urls:
             await database.delete_cached_media(list(rich.cache_urls))
         return None
@@ -580,8 +629,18 @@ async def process_youtube_url(
 
     if settings is not None and not settings.enable_hashtags:
         card.hashtags = []
-
     try:
+
+        rich_sent = await _try_send_rich_youtube_card(
+            update,
+            context,
+            card,
+            thread_id,
+            settings,
+            user_comment,
+        )
+        if rich_sent is not None:
+            return True
         await send_media_card(update, context, card, thread_id=thread_id, user_comment=user_comment, settings=settings)
     except (TimedOut, NetworkError) as exc:
         logger.warning("Неоднозначный сетевой результат при отправке YouTube-карточки; повтор не выполняется: %s", exc)
@@ -636,6 +695,55 @@ async def process_oembed_source(
         return False
 
 
+async def _send_processing_notice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    thread_id: int | None,
+    links_count: int,
+):
+    if update.effective_chat is None:
+        return None
+    text = "⏳ Принял, подготавливаю…" if links_count == 1 else f"⏳ Принял, подготавливаю 1 из {links_count}…"
+    try:
+        return await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            message_thread_id=thread_id,
+            **telegram_timeout_kwargs(),
+        )
+    except TelegramError as exc:
+        logger.info("Не удалось отправить статус обработки: %s", exc)
+        return None
+
+
+async def _edit_processing_notice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    notice,
+    text: str,
+) -> None:
+    if update.effective_chat is None or notice is None:
+        return
+    try:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=notice.message_id,
+            text=text,
+            **telegram_timeout_kwargs(),
+        )
+    except TelegramError:
+        logger.debug("Не удалось обновить статус обработки", exc_info=True)
+
+
+async def _delete_processing_notice(update: Update, context: ContextTypes.DEFAULT_TYPE, notice) -> None:
+    if update.effective_chat is None or notice is None:
+        return
+    try:
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=notice.message_id)
+    except TelegramError:
+        logger.debug("Не удалось удалить статус обработки", exc_info=True)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
 
@@ -665,12 +773,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not links:
         return
 
-    # Only actionable messages consume the rate limit. Otherwise any regular
-    # group message could suppress a supported link sent immediately after it.
     chat_id = update.effective_chat.id
-    if not rate_limiter.is_allowed(user_id, chat_id):
-        logger.info("Rate limit для пользователя %s", user_id)
-        return
 
     if len(links) > config.MAX_LINKS_PER_MESSAGE:
         logger.info(
@@ -705,44 +808,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_comment:
             logger.info("Найден комментарий пользователя длиной %s символов", len(user_comment))
 
-    # Обрабатываем все найденные ссылки
-    processed_count = 0
-    for idx, link in enumerate(links):
-        # Комментарий только для первой найденной ссылки.
-        comment = user_comment if idx == 0 else None
+    notice = await _send_processing_notice(update, context, thread_id, len(links))
+    keep_notice = False
+    lock = _processing_locks.setdefault((user_id, chat_id), asyncio.Lock())
 
-        if not await is_provider_enabled(database, link.source):
-            await send_text_message(
-                update,
-                context,
-                f"ℹ️ Источник {link.source} временно отключён владельцем бота.",
-                thread_id=thread_id,
-                settings=settings,
-            )
-            continue
+    try:
+        async with lock:
+            if not await rate_limiter.wait_until_allowed(user_id, chat_id):
+                logger.info("Очередь обработки переполнена user_id=%s chat_id=%s", user_id, chat_id)
+                keep_notice = True
+                await _edit_processing_notice(
+                    update,
+                    context,
+                    notice,
+                    "⚠️ Сейчас слишком много запросов. Повторите через несколько секунд.",
+                )
+                return
 
-        if link.source == "twitter":
-            success = await process_tweet_url(update, context, link.url, thread_id, comment, settings)
-        elif link.source == "youtube":
-            success = await process_youtube_url(update, context, link.url, thread_id, comment, settings)
-        else:
-            success = await process_oembed_source(update, context, link, thread_id, comment, settings)
+            processed_count = 0
+            for idx, link in enumerate(links):
+                if idx > 0:
+                    await _edit_processing_notice(
+                        update,
+                        context,
+                        notice,
+                        f"⏳ Подготавливаю {idx + 1} из {len(links)}…",
+                    )
 
-        if success:
-            processed_count += 1
+                # Комментарий только для первой найденной ссылки.
+                comment = user_comment if idx == 0 else None
 
-    logger.info(f"Обработано {processed_count} из {len(links)} ссылок")
+                if not await is_provider_enabled(database, link.source):
+                    await send_text_message(
+                        update,
+                        context,
+                        f"ℹ️ Источник {link.source} временно отключён владельцем бота.",
+                        thread_id=thread_id,
+                        settings=settings,
+                    )
+                    continue
 
-    # Удаляем исходное сообщение в группах если включена опция
-    chat = update.effective_chat
-    if (
-        settings.remove_message_in_groups
-        and chat.type in ["group", "supergroup"]
-        and update.message.message_id
-        and processed_count > 0
-    ):  # Только если хотя бы одна ссылка обработана
-        try:
-            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-            logger.info(f"Удалено сообщение {update.message.message_id} в группе {chat.id}")
-        except TelegramError as e:
-            logger.warning(f"Не удалось удалить сообщение: {e}")
+                if link.source == "twitter":
+                    success = await process_tweet_url(update, context, link.url, thread_id, comment, settings)
+                elif link.source == "youtube":
+                    success = await process_youtube_url(update, context, link.url, thread_id, comment, settings)
+                else:
+                    success = await process_oembed_source(update, context, link, thread_id, comment, settings)
+
+                if success:
+                    processed_count += 1
+
+            logger.info("Обработано %s из %s ссылок", processed_count, len(links))
+
+            chat = update.effective_chat
+            if (
+                settings.remove_message_in_groups
+                and chat.type in ["group", "supergroup"]
+                and update.message.message_id
+                and processed_count > 0
+            ):
+                try:
+                    await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+                    logger.info("Удалено сообщение %s в группе %s", update.message.message_id, chat.id)
+                except TelegramError as exc:
+                    logger.warning("Не удалось удалить сообщение: %s", exc)
+    finally:
+        if not keep_notice:
+            await _delete_processing_notice(update, context, notice)

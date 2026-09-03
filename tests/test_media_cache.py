@@ -7,6 +7,27 @@ from src.services.media_cache import cache_tweet_media, remember_sent_rich_media
 from src.twitter.models import MediaItem, Tweet
 
 
+class CacheBot:
+    def __init__(self):
+        self.deleted: list[tuple[int, int]] = []
+
+    async def send_photo(self, **kwargs):
+        return SimpleNamespace(
+            message_id=77,
+            photo=[
+                SimpleNamespace(
+                    file_id="uploaded-photo-id",
+                    file_unique_id="uploaded-photo-unique",
+                    width=1200,
+                    height=800,
+                )
+            ],
+        )
+
+    async def delete_message(self, chat_id: int, message_id: int):
+        self.deleted.append((chat_id, message_id))
+
+
 def test_inline_cache_only_reuses_existing_file_ids(tmp_path):
     async def run():
         database = Database(str(tmp_path / "dropwire.sqlite3"))
@@ -34,6 +55,7 @@ def test_inline_cache_only_reuses_existing_file_ids(tmp_path):
             )
 
             cached = await cache_tweet_media(
+                None,
                 database,
                 [
                     MediaItem(type="video", url=video_url),
@@ -43,6 +65,7 @@ def test_inline_cache_only_reuses_existing_file_ids(tmp_path):
 
             assert [item.file_id for item in cached] == ["video-file-id", "photo-file-id"]
             assert await cache_tweet_media(
+                None,
                 database,
                 [MediaItem(type="photo", url="https://pbs.twimg.com/media/missing.jpg")],
             ) == []
@@ -123,7 +146,7 @@ def test_ordinary_rich_message_populates_inline_cache(tmp_path):
 
             await remember_sent_rich_media(database, tweet, rich_message)
 
-            cached = await cache_tweet_media(database, media)
+            cached = await cache_tweet_media(None, database, media)
             assert [item.file_id for item in cached] == [
                 "video-file-id",
                 "photo-one-large",
@@ -131,6 +154,28 @@ def test_ordinary_rich_message_populates_inline_cache(tmp_path):
             ]
             assert cached[0].width == 1080
             assert cached[1].width == 1200
+        finally:
+            await database.close()
+
+    asyncio.run(run())
+
+
+def test_transient_cache_upload_is_deleted_after_file_id_is_saved(tmp_path):
+    async def run():
+        database = Database(str(tmp_path / "dropwire.sqlite3"))
+        await database.connect()
+        await database.init_schema()
+        bot = CacheBot()
+        try:
+            await database.set_setting("global", 0, "inline_cache_chat_id", "-100123")
+            url = "https://pbs.twimg.com/media/new-photo.jpg"
+            cached = await cache_tweet_media(bot, database, [MediaItem(type="photo", url=url)])
+
+            assert [item.file_id for item in cached] == ["uploaded-photo-id"]
+            assert bot.deleted == [(-100123, 77)]
+            row = await database.get_cached_media(url)
+            assert row is not None
+            assert row["file_id"] == "uploaded-photo-id"
         finally:
             await database.close()
 

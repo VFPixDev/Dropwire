@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections import defaultdict, deque
 from src.config import config
@@ -34,6 +35,31 @@ class RateLimiter:
 
         self.user_timestamps[user_id] = now
         return True
+
+    async def wait_until_allowed(self, user_id: int, chat_id: int, max_wait: float = 30.0) -> bool:
+        """Wait for a slot instead of silently dropping an actionable request."""
+        deadline = time.monotonic() + max_wait
+        while True:
+            if self.is_allowed(user_id, chat_id):
+                return True
+            now = time.monotonic()
+            if now >= deadline:
+                return False
+            await asyncio.sleep(min(max(self.retry_after(user_id, chat_id, now), 0.05), 1.0))
+
+    def retry_after(self, user_id: int, chat_id: int, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else now
+        user_wait = max(config.RATE_LIMIT_SECONDS - (now - self.user_timestamps.get(user_id, 0)), 0.0)
+
+        chat_wait = 0.0
+        window = config.RATE_LIMIT_CHAT_SECONDS
+        if window > 0:
+            timestamps = self.chat_timestamps[chat_id]
+            while timestamps and now - timestamps[0] >= window:
+                timestamps.popleft()
+            if len(timestamps) >= config.RATE_LIMIT_CHAT_BURST:
+                chat_wait = max(window - (now - timestamps[0]), 0.0)
+        return max(user_wait, chat_wait)
 
     def _consume_chat_slot(self, chat_id: int, now: float) -> bool:
         window = config.RATE_LIMIT_CHAT_SECONDS

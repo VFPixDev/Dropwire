@@ -12,6 +12,7 @@ from aiogram.types import (
 
 from src.handlers.inline import (
     _build_result,
+    _build_status_result,
     _build_rich_twitter_result,
     _build_twitter_result,
     _prepend_sender_quote,
@@ -297,3 +298,15 @@ def test_rich_inline_collage_combines_cached_video_and_photos(tmp_path):
             await database.close()
 
     asyncio.run(run())
+
+
+def test_inline_status_is_compact_article():
+    link = LinkMatch("twitter", "https://x.com/example/status/123", 0)
+
+    built = _build_status_result(link, "Подготавливаю", "Подождите несколько секунд")
+
+    assert isinstance(built.primary, InlineQueryResultArticle)
+    assert built.primary is built.fallback
+    assert built.primary.title == "Подготавливаю"
+    assert built.primary.description == "Подождите несколько секунд"
+    assert built.primary.reply_markup.inline_keyboard[0][0].url == link.url

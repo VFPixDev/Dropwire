@@ -21,7 +21,9 @@ def format_count(count: int | None) -> str:
 def format_seconds(total_seconds: int) -> str:
     hours, remainder = divmod(max(total_seconds, 0), 3600)
     minutes, seconds = divmod(remainder, 60)
-    return f"{hours:02}:{minutes:02}:{seconds:02}"
+    if hours:
+        return f"{hours}:{minutes:02}:{seconds:02}"
+    return f"{minutes}:{seconds:02}"
 
 
 def parse_duration_to_seconds(iso_duration: str) -> int:
@@ -110,7 +112,13 @@ async def fetch_youtube_card(url: str) -> MediaCard:
         )
         published_at = datetime.fromisoformat(snippet.get("publishedAt", "1970-01-01T00:00:00Z").replace("Z", "+00:00"))
         author = snippet.get("channelTitle", "Unknown")
-        author_tag = await fetch_youtube_channel_tag(str(snippet.get("channelId", "")), client) or author
+        channel_id = str(snippet.get("channelId", ""))
+        author_tag = await fetch_youtube_channel_tag(channel_id, client) or author
+        author_url = (
+            f"https://www.youtube.com/{author_tag}"
+            if author_tag.startswith("@")
+            else f"https://www.youtube.com/channel/{channel_id}"
+        )
 
     return MediaCard(
         source="youtube",
@@ -120,6 +128,7 @@ async def fetch_youtube_card(url: str) -> MediaCard:
         text=None,
         author_name=author,
         author_handle=author_tag,
+        author_url=author_url,
         published_at=published_at,
         thumbnail_url=thumbnail_url,
         duration_text=format_seconds(duration_seconds),
@@ -128,8 +137,8 @@ async def fetch_youtube_card(url: str) -> MediaCard:
             likes=int(statistics["likeCount"]) if "likeCount" in statistics else None,
         ),
         buttons=[
-            Button(text="▶ Открыть в YouTube", url=f"https://youtu.be/{video_id}"),
-            Button(text="📥 Скачать в ЛС", callback_data=f"download:youtube:{video_id}"),
+            Button(text="▶ Открыть", url=f"https://youtu.be/{video_id}"),
+            Button(text="📥 Скачать", callback_data=f"download:youtube:{video_id}"),
         ],
         hashtags=build_hashtags("youtube", "video", author_tag),
     )

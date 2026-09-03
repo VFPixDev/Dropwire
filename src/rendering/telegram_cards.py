@@ -70,12 +70,12 @@ def format_card_text(card: MediaCard) -> str:
 
 
 def build_card_keyboard(card: MediaCard) -> InlineKeyboardMarkup | None:
-    rows: list[list[InlineKeyboardButton]] = []
-    for button in card.buttons:
-        telegram_button = _build_button(button)
-        if telegram_button:
-            rows.append([telegram_button])
-    return InlineKeyboardMarkup(rows) if rows else None
+    buttons = [telegram_button for button in card.buttons if (telegram_button := _build_button(button))]
+    if not buttons:
+        return None
+    if card.source == "youtube":
+        return InlineKeyboardMarkup([buttons])
+    return InlineKeyboardMarkup([[button] for button in buttons])
 
 
 def _build_button(button: Button) -> InlineKeyboardButton | None:

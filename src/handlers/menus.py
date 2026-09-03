@@ -50,6 +50,9 @@ CB_SETTINGS_TOGGLE = "st:tog:"
 CB_SETTINGS_SENDER = "st:sender:"
 CB_SETTINGS_SENDER_SET = "st:sender_set:"
 CB_SETTINGS_RESET = "st:reset:"
+CB_INLINE_CACHE = "st:inline_cache"
+CB_INLINE_CACHE_BIND = "st:inline_cache:bind"
+CB_INLINE_CACHE_DISABLE = "st:inline_cache:disable"
 
 CB_TRANSLATE_USER = "tr:user"
 CB_TRANSLATE_GROUP = "tr:group"
@@ -173,6 +176,8 @@ def get_scope_settings_keyboard(scope: str, owner_id: int) -> InlineKeyboardMark
                 )
             ]
         )
+    if scope == "global":
+        rows.append([InlineKeyboardButton("🗄 Технический медиакэш", callback_data=CB_INLINE_CACHE)])
     rows.append([InlineKeyboardButton("Отправитель в цитате", callback_data=f"{CB_SETTINGS_SENDER}{scope}:{owner_id}")])
     rows.append([InlineKeyboardButton("🌐 Перевод", callback_data=f"{CB_TRANSLATE_SET}{scope}:{owner_id}:menu")])
     if scope == "group":
@@ -181,6 +186,32 @@ def get_scope_settings_keyboard(scope: str, owner_id: int) -> InlineKeyboardMark
         )
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=CALLBACK_SETTINGS)])
     return InlineKeyboardMarkup(rows)
+
+
+def get_inline_cache_text(cache_chat_id: int | None, pending: bool = False) -> str:
+    if pending:
+        return """<b>🗄 Технический медиакэш</b>
+
+Перешлите сюда любое сообщение из закрытого канала-кэша.
+Бот должен быть администратором с правами публикации и удаления сообщений."""
+
+    status = f"<code>{cache_chat_id}</code>" if cache_chat_id is not None else "не подключён"
+    return f"""<b>🗄 Технический медиакэш</b>
+
+Канал: {status}
+
+Медиа временно загружается в этот канал для получения Telegram <code>file_id</code>. После сохранения идентификатора сообщение сразу удаляется."""
+
+
+def get_inline_cache_keyboard(cache_chat_id: int | None, pending: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if not pending:
+        rows.append([InlineKeyboardButton("🔗 Подключить канал", callback_data=CB_INLINE_CACHE_BIND)])
+        if cache_chat_id is not None:
+            rows.append([InlineKeyboardButton("❌ Отключить", callback_data=CB_INLINE_CACHE_DISABLE)])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=CB_SETTINGS_GLOBAL)])
+    return InlineKeyboardMarkup(rows)
+
 
 def get_sender_mode_keyboard(scope: str, owner_id: int, current: str) -> InlineKeyboardMarkup:
     rows = []

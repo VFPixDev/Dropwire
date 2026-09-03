@@ -59,3 +59,7 @@ def test_fetch_youtube_card_omits_description_and_uses_channel_handle(monkeypatc
     assert card.author_name == "Канал с пробелами"
     assert card.author_handle == "@pilmek"
     assert card.hashtags == ["#youtube", "#video", "#pilmek"]
+    assert card.author_url == "https://www.youtube.com/@pilmek"
+    assert card.duration_text == "1:05"
+    assert [button.text for button in card.buttons] == ["▶ Открыть", "📥 Скачать"]
+    assert card.buttons[0].url == "https://youtu.be/dQw4w9WgXcQ"

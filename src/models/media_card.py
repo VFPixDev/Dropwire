@@ -27,6 +27,7 @@ class MediaCard:
     text: Optional[str] = None
     author_name: Optional[str] = None
     author_handle: Optional[str] = None
+    author_url: Optional[str] = None
     published_at: Optional[datetime] = None
     thumbnail_url: Optional[str] = None
     duration_text: Optional[str] = None

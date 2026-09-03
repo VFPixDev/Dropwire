@@ -5,7 +5,7 @@ import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command
 from aiogram import BaseMiddleware
 from aiogram.types import BotCommand, CallbackQuery, ChatMemberUpdated, ErrorEvent, InlineQuery, Message
@@ -22,6 +22,7 @@ from src.media.cleanup import cleanup_temp_files
 from src.services.database import Database
 from src.services.download_queue import DownloadQueue
 from src.services.youtube_downloader import YtDlpDownloader
+from src.services.settings import GLOBAL_OWNER_ID, is_admin
 from src.telegram_runtime import (
     ApplicationState,
     BotAdapter,
@@ -164,6 +165,49 @@ def build_dispatcher(bot: BotAdapter, application: ApplicationState) -> Dispatch
     async def on_message(message: Message) -> None:
         await handle_message(message_update(message, bot), context())
 
+    async def is_pending_cache_binding(message: Message) -> bool:
+        pending = application.bot_data.get("pending_cache_bindings")
+        return bool(message.from_user and isinstance(pending, set) and message.from_user.id in pending)
+
+    async def on_cache_binding(message: Message) -> None:
+        pending = application.bot_data.get("pending_cache_bindings")
+        if message.from_user is None or not isinstance(pending, set):
+            return
+        user_id = message.from_user.id
+        if not is_admin(user_id) or message.chat.type != "private":
+            pending.discard(user_id)
+            return
+
+        origin = message.forward_origin
+        channel = getattr(origin, "chat", None)
+        if channel is None or channel.type != "channel":
+            await message.answer("Нужна пересылка именно из канала. Попробуйте ещё раз.")
+            return
+        try:
+            member = await bot.get_chat_member(chat_id=channel.id, user_id=bot.id)
+        except TelegramAPIError:
+            await message.answer("Не удалось открыть канал. Добавьте бота в администраторы и повторите.")
+            return
+
+        status = getattr(member.status, "value", member.status)
+        can_post = getattr(member, "can_post_messages", True)
+        can_delete = getattr(member, "can_delete_messages", True)
+        if (
+            str(status) not in {"administrator", "creator", "owner"}
+            or can_post is False
+            or can_delete is False
+        ):
+            await message.answer("Боту нужны права публикации и удаления сообщений в канале-кэше.")
+            return
+
+        database = application.bot_data.get("database")
+        if not isinstance(database, Database):
+            await message.answer("База данных пока недоступна.")
+            return
+        await database.set_setting("global", GLOBAL_OWNER_ID, "inline_cache_chat_id", str(channel.id))
+        pending.discard(user_id)
+        await message.answer(f"Технический медиакэш подключён: <code>{channel.id}</code>.")
+
     async def on_error(event: ErrorEvent) -> None:
         error = event.exception
         if isinstance(error, TelegramNetworkError):
@@ -182,6 +226,7 @@ def build_dispatcher(bot: BotAdapter, application: ApplicationState) -> Dispatch
     dispatcher.message.register(on_downloads, Command("downloads"))
     dispatcher.message.register(on_admin, Command("admin"))
     dispatcher.message.register(on_delete, Command("del"))
+    dispatcher.message.register(on_cache_binding, is_pending_cache_binding)
     dispatcher.callback_query.register(on_callback)
     dispatcher.inline_query.register(on_inline)
     dispatcher.my_chat_member.register(on_member)
