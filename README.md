@@ -40,7 +40,7 @@ The release image is published as `ghcr.io/vfpixdev/dropwire`. For a private pac
 docker login ghcr.io
 cp .env.example .env
 # Set BOT_TOKEN, BOT_ADMIN_IDS and YOUTUBE_API_KEY.
-DROPWIRE_IMAGE=ghcr.io/vfpixdev/dropwire:1.3.0 docker compose up -d
+DROPWIRE_IMAGE=ghcr.io/vfpixdev/dropwire:latest docker compose up -d
 docker compose ps
 ```
 

@@ -73,7 +73,12 @@ async def build_youtube_rich_message(
         )
     )
     if hashtags:
-        blocks.append(InputRichBlockFooter(text=hashtags))
+        blocks.extend(
+            (
+                InputRichBlockDivider(),
+                InputRichBlockFooter(text=hashtags),
+            )
+        )
     return BuiltYoutubeRichMessage(message=InputRichMessage(blocks=blocks))
 
 
@@ -96,7 +101,7 @@ def _build_inline_message(
         )
     )
     if hashtags:
-        parts.append(f"<footer>{escape(hashtags)}</footer>")
+        parts.extend(("<hr/>", f"<footer>{escape(hashtags)}</footer>"))
 
     return InputRichMessage(
         html="".join(parts),

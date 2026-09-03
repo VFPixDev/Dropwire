@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from aiogram.types import (
+    InputRichBlockDivider,
     InputRichBlockFooter,
     InputRichBlockParagraph,
     InputRichBlockPhoto,
@@ -68,7 +69,8 @@ def test_youtube_rich_message_uses_cover_title_channel_and_metadata():
     assert blocks[2].text.url == "https://www.youtube.com/@nocoldiz"
     assert isinstance(blocks[3], InputRichBlockFooter)
     assert blocks[3].text.endswith("3:26")
-    assert blocks[4].text == "#youtube #video #nocoldiz"
+    assert isinstance(blocks[4], InputRichBlockDivider)
+    assert blocks[5].text == "#youtube #video #nocoldiz"
 
 
 def test_youtube_inline_rich_message_reuses_cached_thumbnail(tmp_path):
@@ -78,12 +80,19 @@ def test_youtube_inline_rich_message_reuses_cached_thumbnail(tmp_path):
         await database.init_schema()
         try:
             await database.upsert_cached_media(THUMBNAIL, "photo", "cached-cover")
-            built = await build_youtube_rich_message(None, database, _card(), inline=True)
+            built = await build_youtube_rich_message(
+                None,
+                database,
+                _card(),
+                hashtags="#youtube #video #nocoldiz",
+                inline=True,
+            )
 
             assert built is not None
             assert built.cache_urls == (THUMBNAIL,)
             assert built.message.html.startswith('<img src="tg://photo?id=cover"/>')
             assert len(built.message.media) == 1
+            assert "<hr/><footer>#youtube #video #nocoldiz</footer>" in built.message.html
             assert built.message.media[0].media.media == "cached-cover"
         finally:
             await database.close()
