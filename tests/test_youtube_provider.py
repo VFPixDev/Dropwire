@@ -1,4 +1,7 @@
 import asyncio
+from contextlib import asynccontextmanager
+
+import httpx
 
 from src.providers.youtube import fetch_youtube_card
 
@@ -47,6 +50,11 @@ class FakeAsyncClient:
                 },
             )
         return FakeResponse(200, {"items": [{"snippet": {"customUrl": "@pilmek"}}]})
+
+    @asynccontextmanager
+    async def stream(self, method, url, **kwargs):
+        result = await self.get(url, kwargs["params"])
+        yield httpx.Response(result.status_code, json=result._payload, request=httpx.Request(method, url))
 
 
 def test_fetch_youtube_card_omits_description_and_uses_channel_handle(monkeypatch):

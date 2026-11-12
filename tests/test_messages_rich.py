@@ -151,6 +151,7 @@ def test_rich_layout_nests_translated_reference_media_and_combines_footer():
 
 
 def test_rich_layout_combines_original_video_bytes_and_photos(monkeypatch):
+    monkeypatch.setattr("src.rendering.twitter_rich.config.MAX_MEDIA_MB", 50)
     original_video = b"original-video-bytes"
 
     async def fake_download(url, max_bytes):

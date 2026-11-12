@@ -10,7 +10,7 @@
 .venv/Scripts/python -m pip check
 .venv/Scripts/pip-audit -r requirements.txt
 docker compose config --quiet
-docker build -t dropwire:local .
+docker build --pull --no-cache-filter system -t dropwire:local .
 docker scout cves dropwire:local --only-severity critical,high
 ```
 
@@ -44,12 +44,16 @@ The same static, test, audit and container-build checks run in GitHub Actions on
 15. Verify a quoted post and a reply include the referenced post text and media inside one quotation block, with exactly one visual interval for a media-only post.
 16. Verify a Twitter GIF plays as an animation and a normal video keeps its original aspect ratio.
 17. In a group, reply `/del` to a card as its requester and verify the whole card/album is deleted while the original link remains. Verify another regular member cannot delete it and a group administrator can.
+18. Send a YouTube link and verify the full-size thumbnail, linked channel, absolute publication date and the `Open` / `Download` buttons in one row. Repeat through inline mode.
+19. Simulate an unavailable Twitter attachment and verify the other attachments remain in their original sections, the card keeps its Rich Message layout and the original button remains available. No album, pointing-finger message or separate button message should appear.
+20. Disable personal or group translation while global translation is enabled; verify it stays disabled in that scope. A DeepL service notice must never replace post or quote text or create a translation attribution.
+21. Send several links with one unavailable or beyond the per-message limit; verify the original message remains. Repeat with links in a media caption and an uppercase bot mention.
+22. Enable replies and source-message removal in a group. Reply to another person's message with a supported link; verify the card replies to that person's message, stays in the same topic, and only the sender's text link is removed. Repeat for Twitter, YouTube, Spotify and SoundCloud, and verify a user attachment with a caption link is retained. A plain topic message must not accidentally reply to the topic-creation service message.
 
 ## Expected Limitations
 
 - Twitter currently uses FxTwitter and automatically falls back from its JSON endpoint to HTML when necessary.
-- Uncached inline Twitter media and YouTube thumbnails require a private technical cache channel. Staging messages are deleted immediately after Telegram returns reusable file identifiers; when the channel is unavailable, the bot uses a compact fallback.
+- Uncached inline Twitter media and YouTube thumbnails require a private technical cache channel. Staging messages are deleted immediately after Telegram returns reusable file identifiers; Twitter keeps a Rich Message with available media and an original-link button when an attachment cannot be prepared.
 - Spotify author and duration require optional Spotify API credentials; basic cards do not.
 - SoundCloud oEmbed does not always provide duration.
 - Mobile downloads require a public HTTPS `WEB_BASE_URL`; `localhost` works only on the Docker host.
-18. Send a YouTube link and verify the full-size thumbnail, linked channel, absolute publication date and the `Open` / `Download` buttons in one row. Repeat through inline mode.

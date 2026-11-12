@@ -15,7 +15,7 @@ from src.config import config
 from src.handlers.callbacks import handle_callback_query
 from src.handlers.chat_members import handle_my_chat_member
 from src.handlers.commands import admin_panel, downloads, help_command, settings, start
-from src.handlers.inline import handle_inline_query
+from src.handlers.inline import handle_inline_query, shutdown_inline_tasks
 from src.handlers.delete import delete_card
 from src.handlers.messages import handle_message
 from src.media.cleanup import cleanup_temp_files
@@ -23,6 +23,7 @@ from src.services.database import Database
 from src.services.download_queue import DownloadQueue
 from src.services.youtube_downloader import YtDlpDownloader
 from src.services.settings import GLOBAL_OWNER_ID, is_admin
+from src.services.media_cache import shutdown_media_cache
 from src.telegram_runtime import (
     ApplicationState,
     BotAdapter,
@@ -33,12 +34,8 @@ from src.telegram_runtime import (
     message_update,
 )
 from src.utils.rate_limit import rate_limiter
+from src.utils.logging_config import configure_logging
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=getattr(logging, config.LOG_LEVEL),
-)
-logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +60,7 @@ async def cleanup_job(context: HandlerContext) -> None:
     database = context.application.bot_data.get("database")
     if isinstance(database, Database):
         await database.prune_deliveries(max_age_hours=48)
+        await database.expire_pending_download_requests()
     logger.info("Периодическая очистка завершена")
 
 
@@ -80,13 +78,13 @@ async def _cleanup_loop(context: HandlerContext) -> None:
 
 async def post_init(bot: BotAdapter, application: ApplicationState) -> None:
     database = Database(config.DATABASE_PATH)
+    application.bot_data["database"] = database
     await database.connect()
     await database.init_schema()
     interrupted = await database.fail_interrupted_downloads()
     if interrupted:
         logger.warning("После перезапуска помечено неудачными загрузок: %s", interrupted)
 
-    application.bot_data["database"] = database
     application.bot_data["download_queue"] = DownloadQueue(config.MAX_CONCURRENT_DOWNLOADS)
     application.bot_data["youtube_downloader"] = YtDlpDownloader(config.DOWNLOAD_DIR)
 
@@ -116,6 +114,11 @@ async def post_init(bot: BotAdapter, application: ApplicationState) -> None:
 
 
 async def post_shutdown(application: ApplicationState) -> None:
+    queue = application.bot_data.get("download_queue")
+    if isinstance(queue, DownloadQueue):
+        await queue.shutdown()
+    await shutdown_inline_tasks()
+    await shutdown_media_cache()
     database = application.bot_data.get("database")
     if isinstance(database, Database):
         await database.close()
@@ -192,11 +195,7 @@ def build_dispatcher(bot: BotAdapter, application: ApplicationState) -> Dispatch
         status = getattr(member.status, "value", member.status)
         can_post = getattr(member, "can_post_messages", True)
         can_delete = getattr(member, "can_delete_messages", True)
-        if (
-            str(status) not in {"administrator", "creator", "owner"}
-            or can_post is False
-            or can_delete is False
-        ):
+        if str(status) not in {"administrator", "creator", "owner"} or can_post is False or can_delete is False:
             await message.answer("Боту нужны права публикации и удаления сообщений в канале-кэше.")
             return
 
@@ -230,7 +229,7 @@ def build_dispatcher(bot: BotAdapter, application: ApplicationState) -> Dispatch
     dispatcher.callback_query.register(on_callback)
     dispatcher.inline_query.register(on_inline)
     dispatcher.my_chat_member.register(on_member)
-    dispatcher.message.register(on_message, F.text & ~F.text.startswith("/"))
+    dispatcher.message.register(on_message, (F.text & ~F.text.startswith("/")) | F.caption)
     dispatcher.errors.register(on_error)
     return dispatcher
 
@@ -247,7 +246,12 @@ async def run() -> None:
         handler_context = HandlerContext(bot=bot, application=application)
         cleanup_task = asyncio.create_task(_cleanup_loop(handler_context), name="dropwire-cleanup")
         logger.info("Запуск в режиме polling")
-        await dispatcher.start_polling(raw_bot, allowed_updates=dispatcher.resolve_used_update_types())
+        await dispatcher.start_polling(
+            raw_bot,
+            allowed_updates=dispatcher.resolve_used_update_types(),
+            tasks_concurrency_limit=config.MAX_CONCURRENT_UPDATES,
+            close_bot_session=False,
+        )
     finally:
         if cleanup_task is not None:
             cleanup_task.cancel()
@@ -258,6 +262,7 @@ async def run() -> None:
 
 
 def main() -> None:
+    configure_logging()
     try:
         asyncio.run(run())
     except (TokenValidationError, TelegramUnauthorizedError) as exc:

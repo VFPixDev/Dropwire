@@ -2,7 +2,7 @@ aiogram==3.31.0
 httpx==0.28.1
 beautifulsoup4==4.15.0
 lxml==6.1.2
-Pillow==12.3.0
+Pillow==13.0.0
 tenacity==9.1.4
 python-dotenv==1.2.3
 aiosqlite==0.22.1

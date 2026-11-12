@@ -11,7 +11,6 @@ from src.telegram_runtime import (
     BadRequest,
     CallbackQueryAdapter as CallbackQuery,
     ContextTypes,
-    Forbidden,
     TelegramError,
     Update,
 )
@@ -101,8 +100,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     logger.info("Callback от юзера %s: %s", user_id, callback_data)
 
-    if not callback_data.startswith("download:"):
-        await query.answer()
+    await query.answer()
 
     if callback_data == CALLBACK_MAIN_MENU:
         await show_main_menu(query, user_id)
@@ -172,7 +170,7 @@ async def handle_youtube_download_requested(
     callback_data: str,
 ) -> None:
     video_id = callback_data.removeprefix("download:youtube:")
-    if not VIDEO_ID_RE.match(video_id):
+    if not VIDEO_ID_RE.fullmatch(video_id):
         await query.answer("Некорректный video id", show_alert=True)
         return
     if query.message is None:
@@ -229,7 +227,7 @@ async def handle_youtube_download_requested(
             text="Выберите качество для скачивания:",
             reply_markup=_youtube_quality_keyboard(options, request_id),
         )
-    except Forbidden:
+    except TelegramError:
         await database.update_download_request(request_id, status="failed")
         await query.answer("Сначала откройте бота в ЛС и нажмите /start", show_alert=True)
         return
@@ -256,7 +254,9 @@ async def handle_youtube_download_cancel(
         await query.answer("Запрос не найден", show_alert=True)
         return
 
-    await database.update_download_request(request_id, status="cancelled")
+    if not await database.cancel_download_request(request_id, user_id):
+        await query.answer("Загрузка уже началась или завершена", show_alert=True)
+        return
     if query.message is not None:
         await query.message.edit_text("❌ Загрузка отменена.")
     await query.answer("Отменено")
@@ -321,17 +321,15 @@ async def handle_youtube_quality_selected(
         await query.answer()
         return
 
-    await query.message.edit_text("⏳ Подготавливаю загрузку...")
     progress = MessageProgress(context, query.message.chat.id, query.message.message_id)
+    await progress.set_text("⏳ Подготавливаю загрузку...")
 
     async def job() -> None:
-        current_request = await database.get_download_request(request_id)
-        if current_request is None or current_request["status"] == "cancelled":
+        if not await database.start_download_request(request_id):
             return
-
-        await database.update_download_request(request_id, status="downloading")
         downloaded = None
         success = False
+        retained = False
         failure_text: str | None = None
 
         async def on_progress(stage: str, percent: int | None = None) -> None:
@@ -352,6 +350,11 @@ async def handle_youtube_quality_selected(
                 return
 
             link = create_download_url(downloaded.file_path)
+            await database.create_download(
+                request_id, str(downloaded.file_path), downloaded.final_size, downloaded.format_note
+            )
+            retained = True
+            await database.update_download_request(request_id, status="ready")
 
             await progress.set_text("📤 Отправляю ссылку на скачивание...", force=True)
             await context.bot.send_message(
@@ -365,32 +368,34 @@ async def handle_youtube_quality_selected(
                 ),
                 disable_web_page_preview=True,
             )
-            await database.create_download(
-                request_id, str(downloaded.file_path), downloaded.final_size, downloaded.format_note
-            )
-            await database.update_download_request(request_id, status="sent")
-            await downloader.cleanup_stale_files(
-                config.DOWNLOAD_FILE_RETENTION_HOURS * 3600,
-                exclude_paths={downloaded.file_path},
-            )
             success = True
+            await database.update_download_request(request_id, status="sent")
         except RuntimeError as exc:
             logger.warning("Ошибка подготовки YouTube download request_id=%s: %s", request_id, exc)
-            await database.update_download_request(request_id, status="failed")
+            await database.update_download_request(request_id, status="ready" if retained else "failed")
             failure_text = str(exc)
         except Exception:
             logger.exception("Ошибка YouTube download request_id=%s", request_id)
-            await database.update_download_request(request_id, status="failed")
-            failure_text = "Не удалось подготовить ссылку. Видео может быть приватным, возрастным или недоступным."
+            await database.update_download_request(request_id, status="ready" if retained else "failed")
+            failure_text = (
+                "Файл сохранён. Откройте /downloads, чтобы получить ссылку."
+                if retained
+                else "Не удалось подготовить ссылку. Видео может быть приватным, возрастным или недоступным."
+            )
         finally:
-            if downloaded is not None and not success:
+            if downloaded is not None and not retained:
                 await downloader.cleanup(downloaded.cleanup_paths)
             if success:
                 await progress.set_text("✅ Готово", force=True)
             elif failure_text:
                 await progress.set_text(failure_text, force=True)
 
-    started, position, _task = await queue.enqueue(job)
+    try:
+        started, position, _task = await queue.enqueue(job)
+    except RuntimeError:
+        await database.update_download_request(request_id, status="failed")
+        await progress.set_text("Очередь загрузок заполнена. Повторите запрос позже.", force=True)
+        return
     if started:
         await query.answer("Загрузка запущена")
     else:
@@ -936,7 +941,7 @@ async def _user_can_manage_group(
         return False
 
     status = str(getattr(member.status, "value", member.status))
-    if status in {"left", "kicked", "banned"}:
+    if status in {"left", "kicked", "banned"} or (status == "restricted" and not getattr(member, "is_member", False)):
         return False
     return linked_as_adder or status in {"administrator", "creator", "owner"}
 

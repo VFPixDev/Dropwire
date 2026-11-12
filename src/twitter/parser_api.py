@@ -1,8 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timezone
+import math
 from typing import Any, Optional
 
-from src.twitter.models import MediaItem, QuotedTweet, Tweet, TweetStats
+from src.twitter.models import MediaItem, Poll, PollOption, QuotedTweet, Tweet, TweetStats
 from src.twitter.parser import parse_date, parse_number
+from src.twitter.translate import valid_translation
 
 
 def _dig(data: dict[str, Any], *keys: str) -> Any:
@@ -35,7 +37,7 @@ def _first_int(*values: Any) -> Optional[int]:
 def _optional_int(value: Any) -> Optional[int]:
     try:
         return int(value) if value is not None else None
-    except (TypeError, ValueError):
+    except TypeError, ValueError, OverflowError:
         return None
 
 
@@ -87,8 +89,10 @@ def _parse_media_item(item: Any, fallback_type: str) -> Optional[MediaItem]:
     if media_type not in {"photo", "video", "animation"}:
         media_type = fallback_type
 
-    url = _best_video_url(item) if media_type in {"video", "animation"} else _first_text(
-        item.get("url"), item.get("media_url_https"), item.get("media_url")
+    url = (
+        _best_video_url(item)
+        if media_type in {"video", "animation"}
+        else _first_text(item.get("url"), item.get("media_url_https"), item.get("media_url"))
     )
     if not url:
         return None
@@ -151,8 +155,8 @@ def _parse_date_value(raw: dict[str, Any]) -> Optional[datetime]:
                 return parsed
         if isinstance(value, (int, float)):
             try:
-                return datetime.fromtimestamp(value)
-            except (OverflowError, OSError, ValueError):
+                return datetime.fromtimestamp(value, timezone.utc).replace(tzinfo=None)
+            except OverflowError, OSError, ValueError:
                 pass
     return None
 
@@ -196,12 +200,62 @@ def _parse_translation(raw: dict[str, Any]) -> tuple[str | None, str | None]:
     translation = raw.get("translation")
     if not isinstance(translation, dict):
         return None, None
-    translated_text = _first_text(translation.get("text")) or None
-    source_language = _first_text(
-        translation.get("source_lang_en"),
-        translation.get("source_lang"),
-    ) or None
+    if translation.get("error") or translation.get("success") is False:
+        return None, None
+    translated_text = valid_translation(_first_text(translation.get("text")))
+    if translated_text is None:
+        return None, None
+    source_language = (
+        _first_text(
+            translation.get("source_lang_en"),
+            translation.get("source_lang"),
+        )
+        or None
+    )
     return translated_text, source_language
+
+
+def _parse_poll(raw: Any) -> Poll | None:
+    if not isinstance(raw, dict):
+        return None
+    choices = raw.get("choices") or raw.get("options")
+    if not isinstance(choices, list):
+        return None
+    votes = [
+        max(_optional_int(item.get("count", item.get("votes"))) or 0, 0) for item in choices if isinstance(item, dict)
+    ]
+    total = max(_optional_int(raw.get("total_votes")) or sum(votes), 0)
+    options = []
+    for choice in choices[:4]:
+        if not isinstance(choice, dict):
+            continue
+        label = _first_text(choice.get("label"), choice.get("text"))
+        if not label:
+            continue
+        count = max(_optional_int(choice.get("count", choice.get("votes"))) or 0, 0)
+        try:
+            percent = float(choice.get("percentage", choice.get("percent", count / total * 100 if total else 0)))
+        except TypeError, ValueError, OverflowError:
+            percent = 0.0
+        percent = min(max(percent, 0), 100) if math.isfinite(percent) else 0.0
+        options.append(PollOption(text=label, votes=count, percent=percent))
+    if not options:
+        return None
+    ended = raw.get("ended") is True or raw.get("is_ended") is True
+    expires_at = raw.get("ends_at")
+    if isinstance(expires_at, str):
+        try:
+            deadline = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            ended = ended or deadline.replace(tzinfo=deadline.tzinfo or timezone.utc) <= datetime.now(timezone.utc)
+        except ValueError:
+            pass
+    return Poll(
+        question=_first_text(raw.get("question")),
+        options=options,
+        total_votes=total,
+        is_ended=ended,
+        time_left=_first_text(raw.get("time_left")) or None,
+    )
 
 
 def parse_tweet_api(data: dict[str, Any], original_url: str) -> Optional[Tweet]:
@@ -239,6 +293,7 @@ def parse_tweet_api(data: dict[str, Any], original_url: str) -> Optional[Tweet]:
     quoted_tweet = _parse_reference(tweet_data.get("quote") or tweet_data.get("quoted_tweet"))
 
     parent_tweet = _parse_reference(tweet_data.get("parent_tweet"))
+    poll = _parse_poll(tweet_data.get("poll"))
     replying_to = tweet_data.get("replying_to")
     if parent_tweet is None and isinstance(replying_to, dict):
         parent_tweet = _parse_reference(replying_to)
@@ -263,7 +318,7 @@ def parse_tweet_api(data: dict[str, Any], original_url: str) -> Optional[Tweet]:
             if full_parent is not None:
                 parent_tweet = full_parent
 
-    if not username or not (text or media or quoted_tweet):
+    if not username or not (text or media or quoted_tweet or parent_tweet or poll):
         return None
     if not display_name:
         display_name = username
@@ -301,6 +356,7 @@ def parse_tweet_api(data: dict[str, Any], original_url: str) -> Optional[Tweet]:
         quoted_tweet=quoted_tweet,
         parent_tweet=parent_tweet,
         stats=stats,
+        poll=poll,
         translated_text=translated_text,
         source_language=source_language,
     )

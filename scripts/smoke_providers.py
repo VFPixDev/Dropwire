@@ -22,9 +22,15 @@ async def _check_telegram() -> bool:
         print("telegram: skipped (BOT_TOKEN is not configured)")
         return True
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(f"https://api.telegram.org/bot{token}/getMe")
-    payload = response.json() if response.is_success else {}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+        payload = response.json() if response.is_success else {}
+    except (httpx.HTTPError, ValueError) as exc:
+        print(f"telegram: failed ({type(exc).__name__})")
+        return False
+    if not isinstance(payload, dict):
+        payload = {}
     result = payload.get("result") if isinstance(payload, dict) else None
     username = result.get("username", "") if isinstance(result, dict) else ""
     inline_enabled = bool(result.get("supports_inline_queries")) if isinstance(result, dict) else False

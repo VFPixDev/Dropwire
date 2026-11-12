@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -38,6 +39,8 @@ def _parse_float(name: str, default: float, min_value: float | None = None) -> f
         value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} должен быть числом") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} должен быть конечным числом")
     if min_value is not None and value < min_value:
         raise ValueError(f"{name} должен быть >= {min_value}")
     return value
@@ -151,8 +154,8 @@ class Config:
             raise ValueError("BOT_TOKEN обязателен")
 
         mode = os.getenv("MODE", "polling")
-        if mode not in {"polling", "webhook"}:
-            raise ValueError("MODE должен быть polling или webhook")
+        if mode != "polling":
+            raise ValueError("Поддерживается только MODE=polling")
 
         allowed_user_ids = _parse_user_ids("TELEGRAM_USER_IDS")
         admin_user_ids = _parse_user_ids("BOT_ADMIN_IDS")
@@ -165,7 +168,7 @@ class Config:
             APP_NAME=os.getenv("APP_NAME", "Dropwire").strip() or "Dropwire",
             MODE=mode,
             TELEGRAM_USER_IDS=allowed_user_ids,
-            BOT_ADMIN_IDS=admin_user_ids or allowed_user_ids or [],
+            BOT_ADMIN_IDS=admin_user_ids or [],
             COMPRESS_MEDIA=_parse_bool("COMPRESS_MEDIA", "1"),
             MAX_MEDIA_MB=_parse_int("MAX_MEDIA_MB", 20, min_value=1),
             FX_BASE_URL=_parse_fx_base_url(),

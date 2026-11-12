@@ -40,7 +40,11 @@ def verify_download_token(token: str, secret: str) -> dict[str, object]:
     except ValueError as exc:
         raise TokenError("Некорректный токен") from exc
 
-    expected_signature = hmac.new(secret.encode("utf-8"), payload_part.encode("ascii"), hashlib.sha256).digest()
+    try:
+        payload_bytes = payload_part.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise TokenError("Некорректный токен") from exc
+    expected_signature = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).digest()
     try:
         got_signature = _b64url_decode(signature_part)
     except Exception as exc:

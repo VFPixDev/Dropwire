@@ -585,6 +585,17 @@ def parse_tweet_html(html: str, original_url: str) -> Optional[Tweet]:
     if not source_language and source_language_from_text:
         source_language = source_language_from_text
 
+    from src.twitter.translate import valid_translation
+
+    translated_text = valid_translation(translated_text)
+    if translated_text is None:
+        source_language = None
+    # A localized HTML description can itself be a DeepL service notice.
+    if text and valid_translation(text) is None:
+        return None
+    if not (text or media or quoted or poll):
+        return None
+
     # Возвращаем твит с правильными данными автора РЕТВИТА
     return Tweet(
         display_name=retweet_display_name,  # Имя автора ретвита

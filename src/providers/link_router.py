@@ -3,12 +3,11 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlparse
 
-from src.twitter.normalize import extract_tweet_id, find_tweet_urls
+from src.twitter.normalize import TWITTER_HOSTS, extract_tweet_id, find_tweet_urls
 from src.providers.youtube_urls import extract_video_id
 
 SourceName = Literal["twitter", "youtube", "spotify", "soundcloud"]
 
-TWITTER_HOSTS = {"twitter.com", "www.twitter.com", "x.com", "www.x.com", "fxtwitter.com", "fixupx.com"}
 SPOTIFY_HOSTS = {"open.spotify.com", "spotify.link"}
 SOUNDCLOUD_HOSTS = {"soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com", "snd.sc"}
 
@@ -25,11 +24,16 @@ class LinkMatch:
 def detect_source(url: str) -> SourceName | None:
     if extract_video_id(url):
         return "youtube"
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        if parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
+            return None
+    except ValueError:
+        return None
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in {"http", "https"}:
         return None
-    if host in TWITTER_HOSTS:
+    if host in TWITTER_HOSTS and extract_tweet_id(url):
         return "twitter"
     if host in SPOTIFY_HOSTS:
         return "spotify"

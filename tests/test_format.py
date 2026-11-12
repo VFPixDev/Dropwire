@@ -2,7 +2,9 @@ from src.utils.text_format import format_number, create_progress_bar, format_pol
 from datetime import datetime
 
 from src.twitter.models import MediaItem, Poll, PollOption, Tweet, TweetStats
-from src.utils.text_format import format_tweet_card
+import asyncio
+from aiogram.types import InputRichBlockDivider, InputRichBlockPhoto
+from src.rendering.twitter_rich import build_twitter_rich_message
 
 
 def test_format_number():
@@ -59,6 +61,9 @@ def test_media_only_tweet_has_exactly_one_empty_row_before_stats():
         stats=TweetStats(replies=1, reposts=2, likes=3, views=4),
     )
 
-    rendered = format_tweet_card(tweet)
-    assert "12:00\n\n💬 1" in rendered
-    assert "12:00\n\n\n💬 1" not in rendered
+    rendered = asyncio.run(build_twitter_rich_message(None, None, tweet))
+    blocks = rendered.message.blocks
+    assert isinstance(blocks[1], InputRichBlockPhoto)
+    assert isinstance(blocks[2], InputRichBlockDivider)
+    assert sum(isinstance(block, InputRichBlockDivider) for block in blocks) == 1
+    assert blocks[3].text == "💬 1  🔁 2  ❤️ 3  👁 4"

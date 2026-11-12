@@ -8,6 +8,7 @@ from src.config import config
 from src.models.media_card import Button, CardStats, MediaCard
 from src.rendering.hashtags import build_hashtags
 from src.providers.youtube_urls import extract_video_id
+from src.providers.http import request_provider
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ async def fetch_youtube_channel_tag(channel_id: str, client: httpx.AsyncClient) 
         "id": channel_id,
         "key": config.YOUTUBE_API_KEY,
     }
-    response = await client.get("https://www.googleapis.com/youtube/v3/channels", params=params)
+    response = await request_provider(client, "https://www.googleapis.com/youtube/v3/channels", params=params)
     if response.status_code != 200:
         logger.warning("YouTube channel API error %s: %s", response.status_code, response.text[:300])
         return None
@@ -84,7 +85,7 @@ async def fetch_youtube_card(url: str) -> MediaCard:
 
     timeout = httpx.Timeout(20.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.get("https://www.googleapis.com/youtube/v3/videos", params=params)
+        response = await request_provider(client, "https://www.googleapis.com/youtube/v3/videos", params=params)
         if response.status_code != 200:
             logger.error("YouTube API error %s: %s", response.status_code, response.text[:500])
             raise RuntimeError("Ошибка YouTube API")
@@ -113,7 +114,11 @@ async def fetch_youtube_card(url: str) -> MediaCard:
         published_at = datetime.fromisoformat(snippet.get("publishedAt", "1970-01-01T00:00:00Z").replace("Z", "+00:00"))
         author = snippet.get("channelTitle", "Unknown")
         channel_id = str(snippet.get("channelId", ""))
-        author_tag = await fetch_youtube_channel_tag(channel_id, client) or author
+        try:
+            author_tag = await fetch_youtube_channel_tag(channel_id, client) or author
+        except httpx.HTTPError, ValueError:
+            logger.info("YouTube channel metadata unavailable; using channel title")
+            author_tag = author
         author_url = (
             f"https://www.youtube.com/{author_tag}"
             if author_tag.startswith("@")

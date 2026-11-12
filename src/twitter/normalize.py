@@ -1,41 +1,46 @@
 import re
-from typing import Optional
+from urllib.parse import urlparse
+
+TWITTER_HOSTS = {
+    f"{prefix}{host}"
+    for prefix in ("", "www.")
+    for host in ("x.com", "twitter.com", "fxtwitter.com", "fixupx.com", "vxtwitter.com")
+}
+STATUS_PATH = re.compile(r"/([A-Za-z0-9_]{1,15})/status/(\d+)(?:/.*)?$")
+WEB_STATUS_PATH = re.compile(r"/i/web/status/(\d+)(?:/.*)?$")
 
 
-def extract_tweet_id(url: str) -> Optional[str]:
-    """Извлекает ID твита из URL"""
-    patterns = [
-        r"(?:twitter|x)\.com/[\w]+/status/(\d+)",
-        r"(?:fxtwitter|fixupx)\.com/[\w]+/status/(\d+)",
-        r"/status/(\d+)",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-
-def extract_username(url: str) -> Optional[str]:
-    """Извлекает username из URL"""
-    match = re.search(r"\.com/([\w]+)/status/", url)
+def _tweet_parts(url: str) -> tuple[str, str] | None:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in TWITTER_HOSTS:
+            return None
+        if parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
+            return None
+    except ValueError:
+        return None
+    match = STATUS_PATH.fullmatch(parsed.path)
     if match:
-        return match.group(1)
-    return None
+        return match.group(1), match.group(2)
+    match = WEB_STATUS_PATH.fullmatch(parsed.path)
+    return ("i", match.group(1)) if match else None
 
 
-def normalize_url(url: str) -> Optional[str]:
-    """Нормализует URL твита в стандартный формат x.com"""
-    tweet_id = extract_tweet_id(url)
-    username = extract_username(url)
+def extract_tweet_id(url: str) -> str | None:
+    parts = _tweet_parts(url)
+    return parts[1] if parts else None
 
-    if tweet_id and username:
-        return f"https://x.com/{username}/status/{tweet_id}"
-    return None
+
+def extract_username(url: str) -> str | None:
+    parts = _tweet_parts(url)
+    return parts[0] if parts else None
+
+
+def normalize_url(url: str) -> str | None:
+    parts = _tweet_parts(url)
+    return f"https://x.com/{parts[0]}/status/{parts[1]}" if parts else None
 
 
 def find_tweet_urls(text: str) -> list[str]:
-    """Находит все ссылки на твиты в тексте"""
-    pattern = r"https?://(?:(?:twitter|x|fxtwitter|fixupx)\.com/[\w]+/status/\d+)"
-    return re.findall(pattern, text)
+    urls = [match.group().rstrip('.,;:!?)"}]') for match in re.finditer(r"https?://[^\s<>()]+", text, re.IGNORECASE)]
+    return [url for url in urls if _tweet_parts(url)]

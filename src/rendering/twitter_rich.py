@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 from html.parser import HTMLParser
+import logging
+from typing import Literal
 from urllib.parse import urlparse
 
 from aiogram.types import (
@@ -29,6 +31,8 @@ from aiogram.types import (
 )
 
 from src.services.database import Database
+from src.media.prepare import prepare_upload
+from src.config import config
 from src.services.media_cache import CachedMedia, cache_tweet_media
 from src.twitter.fetcher import _is_trusted_twitter_media_url, download_media, get_trusted_twitter_mp4_url
 from src.twitter.models import MediaItem, QuotedTweet, Tweet
@@ -40,6 +44,9 @@ from src.utils.text_format import (
     format_tweet_footer,
     translated_or_original_text,
 )
+
+logger = logging.getLogger(__name__)
+MEDIA_UNAVAILABLE = "⚠️ Часть медиа недоступна. Откройте оригинал по кнопке ниже."
 
 
 @dataclass(frozen=True)
@@ -62,20 +69,30 @@ async def build_twitter_rich_message(
     sender_quote: str = "",
     hashtags: str = "",
     inline: bool = False,
+    media_mode: Literal["auto", "upload", "none"] = "auto",
 ) -> BuiltTwitterRichMessage | None:
     all_items = _all_media(tweet)
+    prepared: list[PreparedMedia | None] = [None] * len(all_items)
+    cache_urls: tuple[str, ...] = ()
+    if media_mode == "auto" and database is not None:
+        try:
+            cached = await cache_tweet_media(bot, database, all_items)
+        except Exception:
+            logger.warning("Media cache unavailable; preparing media directly", exc_info=True)
+            cached = []
+        by_url = {item.source_url: item for item in cached}
+        prepared = [
+            PreparedMedia(item.type, _cached_input_media(by_url[item.url])) if item.url in by_url else None
+            for item in all_items
+        ]
+        cache_urls = tuple(item.url for item, ready in zip(all_items, prepared, strict=True) if ready is not None)
+    if not inline and media_mode != "none":
+        for index, item in enumerate(all_items):
+            if prepared[index] is None:
+                direct = await _prepare_direct_media([item], upload_photos=media_mode == "upload")
+                prepared[index] = direct[0]
     if inline:
-        prepared = await _prepare_inline_media(bot, database, all_items)
-        if prepared is None:
-            return None
-        return _build_inline_rich_message(tweet, prepared, all_items, sender_quote, hashtags)
-    else:
-        prepared = await _prepare_inline_media(bot, database, all_items) if database is not None else None
-        using_cache = prepared is not None
-        if prepared is None:
-            prepared = await _prepare_direct_media(all_items)
-    if prepared is None:
-        return None
+        return _build_inline_rich_message(tweet, prepared, cache_urls, sender_quote, hashtags)
 
     cursor = 0
 
@@ -85,6 +102,8 @@ async def build_twitter_rich_message(
         cursor += len(items)
         blocks = []
         for item in selected:
+            if item is None:
+                continue
             if item.media_type == "photo":
                 blocks.append(InputRichBlockPhoto(photo=item.media))
             elif item.media_type == "animation":
@@ -126,6 +145,9 @@ async def build_twitter_rich_message(
     if tweet.poll:
         blocks.append(_paragraph_block(_rich_text_html(format_poll(tweet.poll))))
 
+    if any(item is None for item in prepared):
+        blocks.append(_paragraph_block(MEDIA_UNAVAILABLE))
+
     blocks.extend((InputRichBlockDivider(), _paragraph_block(_stats_line(tweet))))
     footer = format_tweet_footer(tweet, hashtags)
     if footer:
@@ -133,14 +155,14 @@ async def build_twitter_rich_message(
 
     return BuiltTwitterRichMessage(
         message=InputRichMessage(blocks=blocks),
-        cache_urls=tuple(item.url for item in all_items) if using_cache else (),
+        cache_urls=cache_urls,
     )
 
 
 def _build_inline_rich_message(
     tweet: Tweet,
-    prepared: list[PreparedMedia],
-    all_items: list[MediaItem],
+    prepared: list[PreparedMedia | None],
+    cache_urls: tuple[str, ...],
     sender_quote: str,
     hashtags: str,
 ) -> BuiltTwitterRichMessage:
@@ -153,6 +175,8 @@ def _build_inline_rich_message(
         cursor += len(items)
         tags = []
         for item in selected:
+            if item is None:
+                continue
             media_id = f"m{len(attachments)}"
             attachments.append(InputRichMessageMedia(id=media_id, media=item.media))
             scheme = "photo" if item.media_type == "photo" else "video"
@@ -196,6 +220,8 @@ def _build_inline_rich_message(
 
     if tweet.poll:
         parts.append(f"<p>{_rich_text_html(format_poll(tweet.poll))}</p>")
+    if any(item is None for item in prepared):
+        parts.append(f"<p>{MEDIA_UNAVAILABLE}</p>")
     parts.extend(("<hr/>", f"<p>{_stats_line(tweet)}</p>"))
     footer = format_tweet_footer(tweet, hashtags)
     if footer:
@@ -203,37 +229,36 @@ def _build_inline_rich_message(
 
     return BuiltTwitterRichMessage(
         message=InputRichMessage(html="".join(parts), media=attachments or None),
-        cache_urls=tuple(item.url for item in all_items),
+        cache_urls=cache_urls,
     )
 
 
-async def _prepare_inline_media(
-    bot,
-    database: Database | None,
-    items: list[MediaItem],
-) -> list[PreparedMedia] | None:
-    if not items:
-        return []
-    if database is None:
-        return None
-    cached = await cache_tweet_media(bot, database, items)
-    if len(cached) != len(items):
-        return None
-    return [PreparedMedia(item.media_type, _cached_input_media(item)) for item in cached]
-
-
-async def _prepare_direct_media(items: list[MediaItem]) -> list[PreparedMedia] | None:
-    prepared: list[PreparedMedia] = []
+async def _prepare_direct_media(items: list[MediaItem], *, upload_photos: bool = False) -> list[PreparedMedia | None]:
+    prepared: list[PreparedMedia | None] = []
     for index, item in enumerate(items):
         media_url = _trusted_media_url(item)
         if media_url is None:
-            return None
+            prepared.append(None)
+            continue
         media_source: str | BufferedInputFile = media_url
-        if item.type in {"video", "animation"}:
-            content = await download_media(media_url, max_bytes=50 * 1024 * 1024)
+        if upload_photos or item.type in {"video", "animation"}:
+            try:
+                content = await download_media(media_url, max_bytes=min(config.MAX_MEDIA_MB, 50) * 1024 * 1024)
+            except Exception:
+                logger.warning("Media preparation failed", exc_info=True)
+                content = None
             if content is None:
-                return None
-            media_source = BufferedInputFile(content, filename=f"twitter_{index}.mp4")
+                prepared.append(None)
+                continue
+            if upload_photos:
+                content, metadata = await prepare_upload(content, item.type)
+                if content is None:
+                    prepared.append(None)
+                    continue
+                if metadata is not None:
+                    item = replace(item, width=metadata.width, height=metadata.height, duration=metadata.duration)
+            extension = "jpg" if item.type == "photo" else "mp4"
+            media_source = BufferedInputFile(content, filename=f"twitter_{index}.{extension}")
         prepared.append(PreparedMedia(item.type, _direct_input_media(item, media_source)))
     return prepared
 

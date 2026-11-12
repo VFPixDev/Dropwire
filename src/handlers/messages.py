@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from html import escape
 from typing import Optional
+from weakref import WeakValueDictionary
 
 from aiogram.enums import ParseMode
-from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, ReplyParameters
+from aiogram.types import ReplyParameters
 
 from src.telegram_runtime import BadRequest, ContextTypes, NetworkError, TelegramError, TimedOut, Update
 from src.telegram_ui import InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,22 +34,30 @@ from src.services.settings import (
 )
 from src.services.providers import is_provider_enabled
 from src.utils.sender_quote import format_sender_quote
-from src.utils.text_format import format_tweet_card, format_tweet_footer, has_tweet_translation, shorten_text_for_caption
 from src.utils.rate_limit import rate_limiter
-from src.media.download import download_media_file, get_file_size_mb
-from src.media.compress import compress_image, compress_video
-from src.media.cleanup import delete_files
 
 logger = logging.getLogger(__name__)
-_processing_locks: dict[tuple[int, int], asyncio.Lock] = {}
+_processing_locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
 
 
 def get_reply_to_message_id(update: Update, settings: Optional[EffectiveSettings] = None) -> int | None:
-    """Возвращает ID исходного сообщения для reply, если включено"""
+    """Preserve group reply chains, ignoring implicit forum-topic root replies."""
     reply_to_message = settings.reply_to_message if settings else config.REPLY_TO_MESSAGE
     if reply_to_message and update.message:
+        chat = update.effective_chat
+        replied = getattr(update.message, "reply_to_message", None)
+        thread_id = getattr(update.message, "message_thread_id", None)
+        is_topic = getattr(update.message, "is_topic_message", False)
+        if chat is not None and chat.type in {"group", "supergroup"} and replied is not None:
+            if not (is_topic and replied.message_id == thread_id):
+                return replied.message_id
         return update.message.message_id
     return None
+
+
+def get_reply_parameters(update: Update, settings: Optional[EffectiveSettings] = None) -> ReplyParameters | None:
+    message_id = get_reply_to_message_id(update, settings)
+    return ReplyParameters(message_id=message_id, allow_sending_without_reply=True) if message_id else None
 
 
 def get_tweet_url_keyboard(tweet_url: str) -> InlineKeyboardMarkup:
@@ -96,10 +107,13 @@ async def send_text_message(
         return
 
     chat_id = chat.id
-    reply_to_message_id = get_reply_to_message_id(update, settings)
     send_kwargs = {**telegram_timeout_kwargs(), **kwargs}
     return await context.bot.send_message(
-        chat_id=chat_id, text=text, message_thread_id=thread_id, reply_to_message_id=reply_to_message_id, **send_kwargs
+        chat_id=chat_id,
+        text=text,
+        message_thread_id=thread_id,
+        reply_parameters=get_reply_parameters(update, settings),
+        **send_kwargs,
     )
 
 
@@ -137,40 +151,52 @@ async def _try_send_rich_tweet_card(
         return None
 
     sender_quote = build_sender_quote_prefix(update, user_comment, settings)
-    rich = await build_twitter_rich_message(
-        context.bot,
-        database,
-        tweet,
-        sender_quote=sender_quote,
-        hashtags=hashtags,
-    )
-    if rich is None:
-        return None
-
-    reply_to_message_id = get_reply_to_message_id(update, settings)
-    reply_parameters = ReplyParameters(message_id=reply_to_message_id) if reply_to_message_id else None
-    try:
-        sent = await context.bot.send_rich_message(
-            chat_id=update.effective_chat.id,
-            rich_message=rich.message,
-            message_thread_id=thread_id,
-            reply_parameters=reply_parameters,
-            reply_markup=get_tweet_url_keyboard(tweet.url),
-            **telegram_timeout_kwargs(),
+    reply_parameters = get_reply_parameters(update, settings)
+    for mode in ("auto", "upload", "none"):
+        rich = await build_twitter_rich_message(
+            context.bot,
+            database,
+            tweet,
+            sender_quote=sender_quote,
+            hashtags=hashtags,
+            media_mode=mode,
         )
+        if rich is None:
+            continue
+        try:
+            sent = await context.bot.send_rich_message(
+                chat_id=update.effective_chat.id,
+                rich_message=rich.message,
+                message_thread_id=thread_id,
+                reply_parameters=reply_parameters,
+                reply_markup=get_tweet_url_keyboard(tweet.url),
+                **telegram_timeout_kwargs(),
+            )
+        except BadRequest as exc:
+            logger.info("Telegram rejected Twitter Rich Message mode=%s: %s", mode, exc)
+            if database is not None and rich.cache_urls:
+                try:
+                    await database.delete_cached_media(list(rich.cache_urls))
+                except Exception:
+                    logger.warning("Could not invalidate media cache", exc_info=True)
+            if not (
+                tweet.media
+                or tweet.quoted_tweet
+                and tweet.quoted_tweet.media
+                or tweet.parent_tweet
+                and tweet.parent_tweet.media
+            ):
+                break
+            continue
+
+        await _record_delivery(update, context, sent)
         if database is not None and getattr(sent, "rich_message", None) is not None:
             try:
                 await remember_sent_rich_media(database, tweet, sent.rich_message)
             except Exception:
                 logger.warning("Не удалось сохранить Telegram file_id из Rich Message", exc_info=True)
-    except BadRequest as exc:
-        logger.info("Telegram отклонил Rich Message, используется media fallback: %s", exc)
-        if database is not None and rich.cache_urls:
-            await database.delete_cached_media(list(rich.cache_urls))
-        return None
-
-    await _record_delivery(update, context, sent)
-    return sent
+        return sent
+    return None
 
 
 async def _try_send_rich_youtube_card(
@@ -198,8 +224,7 @@ async def _try_send_rich_youtube_card(
     if rich is None:
         return None
 
-    reply_to_message_id = get_reply_to_message_id(update, settings)
-    reply_parameters = ReplyParameters(message_id=reply_to_message_id) if reply_to_message_id else None
+    reply_parameters = get_reply_parameters(update, settings)
     try:
         sent = await context.bot.send_rich_message(
             chat_id=update.effective_chat.id,
@@ -234,7 +259,8 @@ def should_reply_in_chat(update: Update, settings: EffectiveSettings) -> bool:
     bot_username = update.get_bot().username
 
     # Если бот упомянут
-    if message.text and f"@{bot_username}" in message.text:
+    message_text = message.text or getattr(message, "caption", None) or ""
+    if bot_username and f"@{bot_username}".casefold() in message_text.casefold():
         return True
 
     # Если включен режим ответов в группах
@@ -263,214 +289,30 @@ async def send_tweet_card(
         logger.warning("Не удалось отправить твит: нет effective_chat/effective_user")
         return
 
-    include_translation = has_tweet_translation(tweet)
     hashtags = ""
     enable_hashtags = settings.enable_hashtags if settings else config.ENABLE_HASHTAGS
     if enable_hashtags:
         hashtags = render_hashtags(build_hashtags("twitter", "post", tweet.username))
-
-    card_text = format_tweet_card(tweet, include_translation=include_translation)
-    footer = format_tweet_footer(tweet, hashtags)
-    if footer:
-        card_text = f"{card_text}\n\n{footer}"
-    card_text = prepend_sender_quote(card_text, update, user_comment, settings)
-    caption_above_media = settings.caption_above_media if settings else config.CAPTION_ABOVE_MEDIA
-
-    temp_files = []
-    card_media = list(tweet.media)
-    if tweet.quoted_tweet:
-        card_media.extend(tweet.quoted_tweet.media)
-    if tweet.parent_tweet:
-        card_media.extend(tweet.parent_tweet.media)
-
     try:
-        rich_sent = await _try_send_rich_tweet_card(
-            update,
-            context,
-            tweet,
-            thread_id,
-            settings,
-            user_comment,
-            hashtags,
-        )
-        if rich_sent is not None:
-            return
+        sent = await _try_send_rich_tweet_card(update, context, tweet, thread_id, settings, user_comment, hashtags)
+        if sent is not None:
+            return True
+    except (TimedOut, NetworkError) as exc:
+        # Telegram may already have accepted the message. Do not duplicate it.
+        logger.warning("Ambiguous Twitter delivery; no retry: %s", exc)
+        return False
 
-        # Если нет медиа - просто отправляем текст
-        if not card_media:
-            sent = await send_text_message(
-                update,
-                context,
-                card_text,
-                thread_id=thread_id,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-                reply_markup=get_tweet_url_keyboard(tweet.url),
-                settings=settings,
-            )
-            await _record_delivery(update, context, sent)
-            return
-
-        # Скачиваем медиа
-        media_files = []
-        for media_item in card_media[:10]:  # Ограничение Telegram: 10 медиа
-            file_path = await download_media_file(media_item.url, media_item.type)
-            if file_path:
-                # Сжимаем если нужно
-                if media_item.type == "photo":
-                    compressed_path = compress_image(file_path)
-                else:
-                    compressed_path = compress_video(file_path, is_animation=media_item.type == "animation")
-
-                if get_file_size_mb(compressed_path) > config.MAX_MEDIA_MB:
-                    logger.warning(
-                        "Медиа пропущено: %.2fMB > %sMB", get_file_size_mb(compressed_path), config.MAX_MEDIA_MB
-                    )
-                    temp_files.append(file_path)
-                    if compressed_path != file_path:
-                        temp_files.append(compressed_path)
-                    continue
-
-                media_files.append((media_item, compressed_path))
-                temp_files.append(file_path)
-                if compressed_path != file_path:
-                    temp_files.append(compressed_path)
-
-        if not media_files:
-            # Медиа не удалось скачать
-            sent = await send_text_message(
-                update,
-                context,
-                card_text + "\n\n⚠️ Не удалось загрузить медиа",
-                thread_id=thread_id,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-                settings=settings,
-            )
-            await _record_delivery(update, context, sent)
-            return
-
-        # Проверяем длину caption
-        caption: Optional[str]
-        caption, is_truncated = shorten_text_for_caption(card_text, max_length=1024)
-
-        # Если текст слишком длинный - отправляем отдельно
-        if is_truncated or len(card_text) > 1024:
-            sent_text = await send_text_message(
-                update,
-                context,
-                card_text,
-                thread_id=thread_id,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-                settings=settings,
-            )
-            await _record_delivery(update, context, sent_text)
-            caption = None
-
-        # Отправляем медиа
-        if len(media_files) == 1:
-            # Одно медиа
-            media_item, file_path = media_files[0]
-            reply_to_message_id = get_reply_to_message_id(update, settings)
-            upload = FSInputFile(file_path)
-            common_kwargs = {
-                "chat_id": update.effective_chat.id,
-                "caption": caption,
-                "parse_mode": ParseMode.HTML if caption else None,
-                "message_thread_id": thread_id,
-                "reply_to_message_id": reply_to_message_id,
-                "show_caption_above_media": caption_above_media,
-                "reply_markup": get_tweet_url_keyboard(tweet.url),
-                **telegram_timeout_kwargs(),
-            }
-            if media_item.type == "photo":
-                sent = await context.bot.send_photo(photo=upload, **common_kwargs)
-            elif media_item.type == "animation":
-                sent = await context.bot.send_animation(
-                    animation=upload,
-                    width=media_item.width,
-                    height=media_item.height,
-                    duration=media_item.duration,
-                    **common_kwargs,
-                )
-            else:
-                sent = await context.bot.send_video(
-                    video=upload,
-                    width=media_item.width,
-                    height=media_item.height,
-                    duration=media_item.duration,
-                    supports_streaming=True,
-                    **common_kwargs,
-                )
-            await _record_delivery(update, context, sent)
-        else:
-            # Несколько медиа - альбом
-            media_group: list[InputMediaPhoto | InputMediaVideo] = []
-            reply_to_message_id = get_reply_to_message_id(update, settings)
-
-            for idx, (media_item, file_path) in enumerate(media_files):
-                upload = FSInputFile(file_path)
-                if media_item.type == "photo":
-                    media_obj: InputMediaPhoto | InputMediaVideo = InputMediaPhoto(
-                        media=upload,
-                        caption=caption if idx == 0 else None,
-                        parse_mode=ParseMode.HTML if (idx == 0 and caption) else None,
-                        show_caption_above_media=caption_above_media,
-                    )
-                else:
-                    # Telegram albums do not support animations. This branch is
-                    # only a defensive fallback; X normally exposes one GIF.
-                    media_obj = InputMediaVideo(
-                        media=upload,
-                        caption=caption if idx == 0 else None,
-                        parse_mode=ParseMode.HTML if (idx == 0 and caption) else None,
-                        show_caption_above_media=caption_above_media,
-                        width=media_item.width,
-                        height=media_item.height,
-                        duration=media_item.duration,
-                        supports_streaming=media_item.type == "video",
-                    )
-
-                media_group.append(media_obj)
-
-            sent_album = await context.bot.send_media_group(
-                chat_id=update.effective_chat.id,
-                media=media_group,
-                message_thread_id=thread_id,
-                reply_to_message_id=reply_to_message_id,
-                **telegram_timeout_kwargs(),
-            )
-
-            # Telegram media groups cannot carry an inline keyboard.
-            sent_button = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="👆",
-                message_thread_id=thread_id,
-                reply_markup=get_tweet_url_keyboard(tweet.url),
-                **telegram_timeout_kwargs(),
-            )
-            await _record_delivery(update, context, [*sent_album, sent_button])
-
-    except (TimedOut, NetworkError) as e:
-        # Telegram may have accepted the upload before the client timed out. A
-        # fallback message here would create the duplicate replies users saw.
-        logger.warning("Неоднозначный сетевой результат при отправке медиа; повтор не выполняется: %s", e)
-    except TelegramError as e:
-        logger.error("Ошибка Telegram при отправке медиа: %s", e)
-        sent = await send_text_message(
-            update,
-            context,
-            f"⚠️ Telegram не смог отправить медиафайл.\n\n{card_text}",
-            thread_id=thread_id,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            settings=settings,
-        )
-        await _record_delivery(update, context, sent)
-    finally:
-        # Удаляем временные файлы
-        delete_files(temp_files)
+    # A server without Rich Message support still leaves an actionable source link.
+    sent = await send_text_message(
+        update,
+        context,
+        "⚠️ Не удалось отправить карточку. Публикация доступна по кнопке ниже.",
+        thread_id=thread_id,
+        reply_markup=get_tweet_url_keyboard(tweet.url),
+        settings=settings,
+    )
+    await _record_delivery(update, context, sent)
+    return False
 
 
 async def process_tweet_url(
@@ -505,13 +347,18 @@ async def process_tweet_url(
     # Получаем данные твита
     logger.info(f"Обработка твита: {tweet_id} (язык: {lang_code or 'нет'})")
 
-    tweet = await fetch_complete_tweet(normalized_url, tweet_id, username, lang_code)
+    try:
+        tweet = await fetch_complete_tweet(normalized_url, tweet_id, username, lang_code)
+    except Exception:
+        logger.exception("Tweet fetch failed tweet_id=%s", tweet_id)
+        tweet = None
 
     if not tweet:
         await send_text_message(
             update,
             context,
-            f"❌ Не удалось распарсить твит: {original_url}",
+            "❌ Не удалось получить публикацию. Откройте оригинал по кнопке ниже.",
+            reply_markup=get_tweet_url_keyboard(normalized_url),
             thread_id=thread_id,
             settings=settings,
         )
@@ -523,14 +370,14 @@ async def process_tweet_url(
 
     # Отправляем карточку
     try:
-        await send_tweet_card(update, context, tweet, thread_id, user_comment, settings)
-        return True
+        return await send_tweet_card(update, context, tweet, thread_id, user_comment, settings)
     except Exception as e:
         logger.error("Ошибка при отправке твита: %s", e)
         await send_text_message(
             update,
             context,
             "❌ Не удалось отправить карточку твита.",
+            reply_markup=get_tweet_url_keyboard(normalized_url),
             thread_id=thread_id,
             settings=settings,
         )
@@ -552,7 +399,7 @@ async def send_media_card(
 
     text = prepend_sender_quote(format_card_text(card), update, user_comment, settings)
     keyboard = build_card_keyboard(card)
-    reply_to_message_id = get_reply_to_message_id(update, settings)
+    reply_parameters = get_reply_parameters(update, settings)
     caption_above_media = settings.caption_above_media if settings else config.CAPTION_ABOVE_MEDIA
 
     if card.thumbnail_url:
@@ -563,13 +410,13 @@ async def send_media_card(
                 caption=text,
                 parse_mode=ParseMode.HTML,
                 message_thread_id=thread_id,
-                reply_to_message_id=reply_to_message_id,
+                reply_parameters=reply_parameters,
                 show_caption_above_media=caption_above_media,
                 reply_markup=keyboard,
                 **telegram_timeout_kwargs(),
             )
             await _record_delivery(update, context, sent)
-        except (TimedOut, NetworkError):
+        except TimedOut, NetworkError:
             raise
         except TelegramError as exc:
             logger.warning("Telegram отклонил превью %s, отправляется текстовая карточка: %s", card.source, exc)
@@ -611,10 +458,10 @@ async def process_youtube_url(
     try:
         card = await fetch_youtube_card(original_url)
     except ValueError as exc:
-        await send_text_message(update, context, f"❌ {exc}", thread_id=thread_id, settings=settings)
+        await send_text_message(update, context, f"❌ {escape(str(exc))}", thread_id=thread_id, settings=settings)
         return False
     except RuntimeError as exc:
-        await send_text_message(update, context, f"❌ {exc}", thread_id=thread_id, settings=settings)
+        await send_text_message(update, context, f"❌ {escape(str(exc))}", thread_id=thread_id, settings=settings)
         return False
     except Exception:
         logger.exception("Ошибка обработки YouTube URL: %s", original_url)
@@ -630,7 +477,6 @@ async def process_youtube_url(
     if settings is not None and not settings.enable_hashtags:
         card.hashtags = []
     try:
-
         rich_sent = await _try_send_rich_youtube_card(
             update,
             context,
@@ -644,7 +490,7 @@ async def process_youtube_url(
         await send_media_card(update, context, card, thread_id=thread_id, user_comment=user_comment, settings=settings)
     except (TimedOut, NetworkError) as exc:
         logger.warning("Неоднозначный сетевой результат при отправке YouTube-карточки; повтор не выполняется: %s", exc)
-        return True
+        return False
     except TelegramError as exc:
         logger.warning("Telegram отклонил YouTube-карточку: %s", exc)
         await send_text_message(
@@ -675,10 +521,10 @@ async def process_oembed_source(
         return True
     except (TimedOut, NetworkError) as exc:
         logger.warning("Неоднозначный сетевой результат при отправке %s-карточки: %s", source_name, exc)
-        return True
+        return False
     except (ValueError, RuntimeError) as exc:
         logger.info("Не удалось получить %s-карточку: %s", source_name, exc)
-        await send_text_message(update, context, f"❌ {exc}", thread_id=thread_id, settings=settings)
+        await send_text_message(update, context, f"❌ {escape(str(exc))}", thread_id=thread_id, settings=settings)
         return False
     except TelegramError as exc:
         logger.warning("Telegram отклонил %s-карточку: %s", source_name, exc)
@@ -767,7 +613,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Ищем поддерживаемые ссылки
-    message_text = update.message.text or ""
+    message_text = update.message.text or getattr(update.message, "caption", None) or ""
     links = find_supported_links(message_text)
 
     if not links:
@@ -775,6 +621,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
 
+    thread_id = update.message.message_thread_id if update.message.is_topic_message else None
+
+    total_links_count = len(links)
     if len(links) > config.MAX_LINKS_PER_MESSAGE:
         logger.info(
             "Ограничено число ссылок user_id=%s chat_id=%s: %s -> %s",
@@ -788,14 +637,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update,
             context,
             f"ℹ️ За одно сообщение обрабатываю не больше {config.MAX_LINKS_PER_MESSAGE} ссылок.",
+            thread_id=thread_id,
             settings=settings,
         )
-
-    # Определяем thread_id для топиков
-    thread_id = None
-    if update.message.is_topic_message:
-        thread_id = update.message.message_thread_id
-        logger.info(f"Ответ в топик: {thread_id}")
 
     # Извлекаем комментарий если есть текст перед первой ссылкой
     user_comment = None
@@ -804,7 +648,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_comment = message_text[:first_url_pos].strip()
         # Убираем упоминание бота из комментария
         bot_username = update.get_bot().username
-        user_comment = user_comment.replace(f"@{bot_username}", "").strip()
+        if bot_username:
+            user_comment = re.sub(re.escape(f"@{bot_username}"), "", user_comment, flags=re.IGNORECASE).strip()
         if user_comment:
             logger.info("Найден комментарий пользователя длиной %s символов", len(user_comment))
 
@@ -848,12 +693,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     continue
 
-                if link.source == "twitter":
-                    success = await process_tweet_url(update, context, link.url, thread_id, comment, settings)
-                elif link.source == "youtube":
-                    success = await process_youtube_url(update, context, link.url, thread_id, comment, settings)
-                else:
-                    success = await process_oembed_source(update, context, link, thread_id, comment, settings)
+                try:
+                    if link.source == "twitter":
+                        success = await process_tweet_url(update, context, link.url, thread_id, comment, settings)
+                    elif link.source == "youtube":
+                        success = await process_youtube_url(update, context, link.url, thread_id, comment, settings)
+                    else:
+                        success = await process_oembed_source(update, context, link, thread_id, comment, settings)
+                except Exception:
+                    logger.exception("Link processing failed source=%s", link.source)
+                    success = False
+                    await send_text_message(
+                        update,
+                        context,
+                        "❌ Не удалось обработать ссылку. Откройте оригинал по кнопке ниже.",
+                        thread_id=thread_id,
+                        settings=settings,
+                        reply_markup=get_tweet_url_keyboard(link.url),
+                    )
 
                 if success:
                     processed_count += 1
@@ -864,8 +721,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if (
                 settings.remove_message_in_groups
                 and chat.type in ["group", "supergroup"]
+                and update.message.text
                 and update.message.message_id
-                and processed_count > 0
+                and processed_count == total_links_count
             ):
                 try:
                     await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
