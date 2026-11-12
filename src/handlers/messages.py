@@ -708,6 +708,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if (
                 settings.remove_message_in_groups
                 and chat.type in ["group", "supergroup"]
+                and update.message.text
                 and update.message.message_id
                 and processed_count == total_links_count
             ):

@@ -338,3 +338,28 @@ def test_caption_link_is_processed_and_mention_is_case_insensitive(monkeypatch):
     asyncio.run(messages.handle_message(update, context))
     process.assert_awaited_once()
     assert process.call_args.args[4] == ""
+
+
+@pytest.mark.parametrize("attachment", ["photo", "video", "document", "animation", "audio"])
+def test_caption_processing_never_deletes_user_attachment(monkeypatch, attachment):
+    from dataclasses import replace
+
+    settings = replace(PRIVATE_SETTINGS, reply_in_groups=True, remove_message_in_groups=True)
+    monkeypatch.setattr(messages, "get_effective_settings", AsyncMock(return_value=settings))
+    process = AsyncMock(return_value=True)
+    monkeypatch.setattr(messages, "process_tweet_url", process)
+    monkeypatch.setattr(messages.rate_limiter, "wait_until_allowed", AsyncMock(return_value=True))
+    bot = SimpleNamespace(
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=99)), delete_message=AsyncMock()
+    )
+    update, context = fixtures(bot)
+    update.message.text = None
+    update.message.caption = URL
+    setattr(update.message, attachment, SimpleNamespace(file_id="user-attachment"))
+
+    asyncio.run(messages.handle_message(update, context))
+
+    process.assert_awaited_once()
+    deleted_ids = [call.kwargs["message_id"] for call in bot.delete_message.call_args_list]
+    assert 7 not in deleted_ids
+    assert 99 in deleted_ids
