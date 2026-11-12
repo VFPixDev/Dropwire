@@ -30,6 +30,7 @@ Settings are deliberately separated by scope:
 - Group settings are edited in DM by the user who added the bot or a current Telegram group administrator.
 - Private chats and inline results use fixed compact defaults: caption above media, no hashtags, sender quote or reply.
 - Inside a group, users can configure their own translation; group translation requires group admin rights.
+- With **Reply to message** enabled, a link posted as a reply in a group produces a card replying to the same person/message. Enable **Remove original** to remove the sender's text link after successful processing; user attachments with caption links are retained. Forum topic placement is preserved.
 - Group profiles can be reset to inherited global values.
 
 ## Quick Start

@@ -41,11 +41,23 @@ _processing_locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValu
 
 
 def get_reply_to_message_id(update: Update, settings: Optional[EffectiveSettings] = None) -> int | None:
-    """Возвращает ID исходного сообщения для reply, если включено"""
+    """Preserve group reply chains, ignoring implicit forum-topic root replies."""
     reply_to_message = settings.reply_to_message if settings else config.REPLY_TO_MESSAGE
     if reply_to_message and update.message:
+        chat = update.effective_chat
+        replied = getattr(update.message, "reply_to_message", None)
+        thread_id = getattr(update.message, "message_thread_id", None)
+        is_topic = getattr(update.message, "is_topic_message", False)
+        if chat is not None and chat.type in {"group", "supergroup"} and replied is not None:
+            if not (is_topic and replied.message_id == thread_id):
+                return replied.message_id
         return update.message.message_id
     return None
+
+
+def get_reply_parameters(update: Update, settings: Optional[EffectiveSettings] = None) -> ReplyParameters | None:
+    message_id = get_reply_to_message_id(update, settings)
+    return ReplyParameters(message_id=message_id, allow_sending_without_reply=True) if message_id else None
 
 
 def get_tweet_url_keyboard(tweet_url: str) -> InlineKeyboardMarkup:
@@ -95,10 +107,13 @@ async def send_text_message(
         return
 
     chat_id = chat.id
-    reply_to_message_id = get_reply_to_message_id(update, settings)
     send_kwargs = {**telegram_timeout_kwargs(), **kwargs}
     return await context.bot.send_message(
-        chat_id=chat_id, text=text, message_thread_id=thread_id, reply_to_message_id=reply_to_message_id, **send_kwargs
+        chat_id=chat_id,
+        text=text,
+        message_thread_id=thread_id,
+        reply_parameters=get_reply_parameters(update, settings),
+        **send_kwargs,
     )
 
 
@@ -136,8 +151,7 @@ async def _try_send_rich_tweet_card(
         return None
 
     sender_quote = build_sender_quote_prefix(update, user_comment, settings)
-    reply_to_message_id = get_reply_to_message_id(update, settings)
-    reply_parameters = ReplyParameters(message_id=reply_to_message_id) if reply_to_message_id else None
+    reply_parameters = get_reply_parameters(update, settings)
     for mode in ("auto", "upload", "none"):
         rich = await build_twitter_rich_message(
             context.bot,
@@ -210,8 +224,7 @@ async def _try_send_rich_youtube_card(
     if rich is None:
         return None
 
-    reply_to_message_id = get_reply_to_message_id(update, settings)
-    reply_parameters = ReplyParameters(message_id=reply_to_message_id) if reply_to_message_id else None
+    reply_parameters = get_reply_parameters(update, settings)
     try:
         sent = await context.bot.send_rich_message(
             chat_id=update.effective_chat.id,
@@ -386,7 +399,7 @@ async def send_media_card(
 
     text = prepend_sender_quote(format_card_text(card), update, user_comment, settings)
     keyboard = build_card_keyboard(card)
-    reply_to_message_id = get_reply_to_message_id(update, settings)
+    reply_parameters = get_reply_parameters(update, settings)
     caption_above_media = settings.caption_above_media if settings else config.CAPTION_ABOVE_MEDIA
 
     if card.thumbnail_url:
@@ -397,7 +410,7 @@ async def send_media_card(
                 caption=text,
                 parse_mode=ParseMode.HTML,
                 message_thread_id=thread_id,
-                reply_to_message_id=reply_to_message_id,
+                reply_parameters=reply_parameters,
                 show_caption_above_media=caption_above_media,
                 reply_markup=keyboard,
                 **telegram_timeout_kwargs(),

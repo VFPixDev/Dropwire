@@ -48,6 +48,7 @@ The same static, test, audit and container-build checks run in GitHub Actions on
 19. Simulate an unavailable Twitter attachment and verify the other attachments remain in their original sections, the card keeps its Rich Message layout and the original button remains available. No album, pointing-finger message or separate button message should appear.
 20. Disable personal or group translation while global translation is enabled; verify it stays disabled in that scope. A DeepL service notice must never replace post or quote text or create a translation attribution.
 21. Send several links with one unavailable or beyond the per-message limit; verify the original message remains. Repeat with links in a media caption and an uppercase bot mention.
+22. Enable replies and source-message removal in a group. Reply to another person's message with a supported link; verify the card replies to that person's message, stays in the same topic, and only the sender's text link is removed. Repeat for Twitter, YouTube, Spotify and SoundCloud, and verify a user attachment with a caption link is retained. A plain topic message must not accidentally reply to the topic-creation service message.
 
 ## Expected Limitations
 
