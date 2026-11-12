@@ -11,6 +11,8 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile
 
 from src.services.database import Database
+from src.media.prepare import prepare_upload
+from src.config import config
 from src.services.settings import GLOBAL_OWNER_ID
 from src.twitter.fetcher import (
     _is_trusted_twitter_media_url,
@@ -21,6 +23,7 @@ from src.twitter.models import MediaItem, Tweet
 
 logger = logging.getLogger(__name__)
 _cache_upload_slots = asyncio.Semaphore(4)
+_cache_tasks: dict[tuple[Database, str], asyncio.Task[CachedMedia | None]] = {}
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,31 @@ async def _get_or_upload(
     chat_id: int | None,
     item: MediaItem,
 ) -> CachedMedia | None:
+    key = (database, item.url)
+    task = _cache_tasks.get(key)
+    if task is None:
+        if len(_cache_tasks) >= 128:
+            return None
+        task = asyncio.create_task(_get_or_upload_once(bot, database, chat_id, item))
+        _cache_tasks[key] = task
+
+        def finished(done):
+            if _cache_tasks.get(key) is done:
+                _cache_tasks.pop(key, None)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
+
+async def shutdown_media_cache() -> None:
+    while _cache_tasks:
+        await asyncio.gather(*tuple(_cache_tasks.values()), return_exceptions=True)
+        await asyncio.sleep(0)
+
+
+async def _get_or_upload_once(bot, database: Database, chat_id: int | None, item: MediaItem) -> CachedMedia | None:
     existing = await database.get_cached_media(item.url)
     if existing is not None:
         return _from_row(existing)
@@ -107,7 +135,10 @@ async def _get_or_upload(
                 message = await bot.send_photo(photo=media_url, **common)
                 telegram_file = message.photo[-1] if message.photo else None
             else:
-                content = await download_media(media_url, max_bytes=50 * 1024 * 1024)
+                content = await download_media(media_url, max_bytes=min(config.MAX_MEDIA_MB, 50) * 1024 * 1024)
+                if content is None:
+                    return None
+                content, metadata = await prepare_upload(content, item.type)
                 if content is None:
                     return None
                 filename = "twitter_animation.mp4" if item.type == "animation" else "twitter_video.mp4"
@@ -115,18 +146,18 @@ async def _get_or_upload(
                 if item.type == "animation":
                     message = await bot.send_animation(
                         animation=upload,
-                        width=item.width,
-                        height=item.height,
-                        duration=item.duration,
+                        width=metadata.width if metadata else item.width,
+                        height=metadata.height if metadata else item.height,
+                        duration=metadata.duration if metadata else item.duration,
                         **common,
                     )
                     telegram_file = message.animation
                 else:
                     message = await bot.send_video(
                         video=upload,
-                        width=item.width,
-                        height=item.height,
-                        duration=item.duration,
+                        width=metadata.width if metadata else item.width,
+                        height=metadata.height if metadata else item.height,
+                        duration=metadata.duration if metadata else item.duration,
                         supports_streaming=True,
                         **common,
                     )
@@ -233,10 +264,14 @@ def _iter_media_files(blocks):
 
 def _all_media(tweet: Tweet) -> list[MediaItem]:
     items = list(tweet.media)
-    if tweet.quoted_tweet:
-        items.extend(tweet.quoted_tweet.media)
-    if tweet.parent_tweet:
-        items.extend(tweet.parent_tweet.media)
+    seen: set[str] = set()
+    for reference in (tweet.quoted_tweet, tweet.parent_tweet):
+        if reference is None:
+            continue
+        identity = reference.tweet_id or reference.url
+        if identity not in seen:
+            items.extend(reference.media)
+            seen.add(identity)
     return items
 
 

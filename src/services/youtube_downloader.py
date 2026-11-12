@@ -1,10 +1,13 @@
 import asyncio
+import contextlib
 import json
 import logging
 import shutil
+
 # ffmpeg and ffprobe use resolved binaries and argument lists without a shell.
 import subprocess  # nosec B404
 import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +40,7 @@ class YtDlpDownloader:
     def __init__(self, base_download_dir: str) -> None:
         self.base_download_dir = Path(base_download_dir)
         self.base_download_dir.mkdir(parents=True, exist_ok=True)
+        self._active_paths: set[Path] = set()
 
     async def get_available_format_options(self, video_url: str) -> list[FormatOption]:
         info = await asyncio.to_thread(self._extract_info_sync, video_url)
@@ -75,11 +79,15 @@ class YtDlpDownloader:
             raise ValueError("Некорректное качество загрузки")
         temp_dir = self.base_download_dir / f"job_{video_id}_{uuid4().hex[:8]}"
         temp_dir.mkdir(parents=True, exist_ok=True)
+        self._active_paths.add(temp_dir.resolve())
         video_url = f"https://www.youtube.com/watch?v={video_id}"
 
         loop = asyncio.get_running_loop()
         last_progress_emit_percent = -1
         last_progress_emit_ts = 0.0
+        cancelled = threading.Event()
+        progress_futures = []
+        worker = None
 
         async def emit(stage: str, percent: int | None = None) -> None:
             try:
@@ -89,6 +97,8 @@ class YtDlpDownloader:
 
         def sync_emit(stage: str, percent: int | None = None) -> None:
             nonlocal last_progress_emit_percent, last_progress_emit_ts
+            if cancelled.is_set() or loop.is_closed():
+                raise RuntimeError("Download interrupted")
             if stage == "downloading" and percent is not None:
                 now = time.monotonic()
                 if percent == last_progress_emit_percent and now - last_progress_emit_ts < 1.5:
@@ -101,11 +111,15 @@ class YtDlpDownloader:
                     return
                 last_progress_emit_percent = percent
                 last_progress_emit_ts = now
-            loop.call_soon_threadsafe(asyncio.create_task, emit(stage, percent))
+            progress_futures.append(asyncio.run_coroutine_threadsafe(emit(stage, percent), loop))
 
         try:
             sync_emit("info")
-            final_file = await asyncio.to_thread(self._download_sync, video_url, quality, temp_dir, sync_emit)
+            worker = asyncio.create_task(
+                asyncio.to_thread(self._download_sync, video_url, quality, temp_dir, sync_emit)
+            )
+            final_file = await asyncio.shield(worker)
+            await asyncio.gather(*(asyncio.wrap_future(future) for future in progress_futures))
 
             stored_file = self.base_download_dir / f"{video_id}_{uuid4().hex[:10]}{final_file.suffix}"
             shutil.move(str(final_file), str(stored_file))
@@ -122,9 +136,22 @@ class YtDlpDownloader:
             await self.cleanup([temp_dir])
             logger.warning("yt-dlp download failed for video_id=%s: %s", video_id, exc)
             raise RuntimeError("Не удалось скачать это видео с YouTube") from exc
+        except asyncio.CancelledError:
+            cancelled.set()
+            if worker is not None:
+                with contextlib.suppress(Exception):
+                    await worker
+            await self.cleanup([temp_dir])
+            raise
         except Exception:
             await self.cleanup([temp_dir])
             raise
+        finally:
+            self._active_paths.discard(temp_dir.resolve())
+            if progress_futures:
+                await asyncio.gather(
+                    *(asyncio.wrap_future(future) for future in progress_futures), return_exceptions=True
+                )
 
     async def cleanup(self, paths: list[Path]) -> None:
         for path in sorted(paths, key=lambda item: len(item.parts), reverse=True):
@@ -137,8 +164,30 @@ class YtDlpDownloader:
                 logger.exception("Не удалось удалить временный путь: %s", path)
 
     def _extract_info_sync(self, video_url: str) -> dict[str, Any]:
-        with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+        with YoutubeDL(
+            {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "noplaylist": True,
+                "socket_timeout": 15,
+                "retries": 2,
+                "extractor_retries": 2,
+                "match_filter": self._download_restriction,
+            }
+        ) as ydl:
             return ydl.extract_info(video_url, download=False)
+
+    @staticmethod
+    def _download_restriction(info: dict[str, Any], *, incomplete: bool = False) -> str | None:
+        if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
+            return "Стримы и премьеры пока не поддерживаются"
+        duration = info.get("duration")
+        if duration is None:
+            return None if incomplete else "Не удалось определить длительность видео"
+        if duration > config.MAX_VIDEO_DURATION_MINUTES * 60:
+            return "Видео превышает допустимую длительность"
+        return None
 
     def _build_format_selector(self, quality: str) -> str:
         if quality == "audio":
@@ -176,6 +225,7 @@ class YtDlpDownloader:
             "fragment_retries": 3,
             "max_filesize": config.MAX_FILE_SIZE_MB * 1024 * 1024,
             "socket_timeout": 30,
+            "match_filter": self._download_restriction,
         }
         if quality == "audio":
             ydl_opts["postprocessors"] = [
@@ -229,7 +279,7 @@ class YtDlpDownloader:
             "-map",
             "0:a:0?",
             "-vf",
-            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
             "-c:v",
             "libx264",
             "-profile:v",
@@ -279,7 +329,7 @@ class YtDlpDownloader:
         audio_streams = [item for item in streams if item.get("codec_type") == "audio"]
         video_streams = [item for item in streams if item.get("codec_type") == "video"]
         format_name = str(payload.get("format", {}).get("format_name", ""))
-        if not audio_streams or audio_streams[0].get("codec_name") != "aac":
+        if (audio_only and not audio_streams) or any(item.get("codec_name") != "aac" for item in audio_streams):
             raise RuntimeError("Готовый файл не содержит совместимую AAC-аудиодорожку")
         if not any(name in format_name.split(",") for name in {"mov", "mp4", "m4a"}):
             raise RuntimeError("Готовый файл имеет несовместимый контейнер")
@@ -293,7 +343,7 @@ class YtDlpDownloader:
     async def cleanup_stale_files(self, max_age_seconds: int, exclude_paths: set[Path] | None = None) -> None:
         safe_age_seconds = max(int(max_age_seconds), 300)
         cutoff = time.time() - safe_age_seconds
-        excludes = {path.resolve() for path in (exclude_paths or set())}
+        excludes = {path.resolve() for path in (exclude_paths or set())} | self._active_paths
         for file in self.base_download_dir.iterdir():
             try:
                 resolved = file.resolve()

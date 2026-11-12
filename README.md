@@ -49,7 +49,7 @@ To build from the checked-out source instead:
 ```bash
 cp .env.example .env
 # Set BOT_TOKEN, BOT_ADMIN_IDS and YOUTUBE_API_KEY.
-docker build -t dropwire:local .
+docker build --pull --no-cache-filter system -t dropwire:local .
 DROPWIRE_IMAGE=dropwire:local docker compose up -d
 docker compose ps
 ```
@@ -60,7 +60,9 @@ Enable inline mode once in `@BotFather`: run `/setinline`, select `@dropwire_bot
 
 Rich inline messages can use only media already uploaded to Telegram. In the owner settings, open **Global settings -> Technical media cache**, add the bot to a private channel with posting and deletion rights, then forward any message from that channel to the bot to connect it.
 
-For uncached Twitter media and YouTube thumbnails, Dropwire briefly uploads the file to this channel, stores only the reusable Telegram `file_id` and technical dimensions in SQLite, and immediately deletes the staging message. If the cache channel is unavailable, inline mode falls back to a compact card instead of sending technical files to a user.
+For uncached Twitter media and YouTube thumbnails, Dropwire briefly uploads the file to this channel, stores only the reusable Telegram `file_id` and technical dimensions in SQLite, and immediately deletes the staging message. If Twitter media is unavailable, inline mode keeps the Rich Message layout, available attachments and the original-link button, with a notice about missing media. Ordinary Twitter cards also retain this layout when media fails; the legacy album and separate pointing-finger message have been removed.
+
+Translation service notices (including DeepL's outdated-app response) are rejected. If translation fails, Dropwire keeps the original post without a false translation attribution. Explicitly disabling translation stops inheritance from broader settings.
 
 The web service is exposed on `http://localhost:8080` by default. YouTube browser links stay disabled until `WEB_BASE_URL` is a public HTTPS address that reaches this service.
 

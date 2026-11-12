@@ -10,6 +10,7 @@ import httpx
 from src.config import config
 from src.models.media_card import Button, MediaCard
 from src.providers.oembed import OEmbedData, fetch_oembed
+from src.providers.http import request_provider
 from src.rendering.hashtags import build_hashtags
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ async def _fetch_spotify_metadata(entity_type: str, entity_id: str) -> dict:
     timeout = httpx.Timeout(15.0, connect=8.0)
     endpoint = f"https://api.spotify.com/v1/{API_PATHS[entity_type]}/{entity_id}"
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        response = await client.get(endpoint, headers={"Authorization": f"Bearer {token}"})
+        response = await request_provider(client, endpoint, headers={"Authorization": f"Bearer {token}"})
     if response.status_code != 200:
         raise RuntimeError(f"Spotify Web API HTTP {response.status_code}")
     if len(response.content) > config.PROVIDER_RESPONSE_MAX_KB * 1024:
@@ -115,8 +116,10 @@ async def _get_spotify_access_token() -> str:
             return _access_token
         timeout = httpx.Timeout(15.0, connect=8.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            response = await client.post(
+            response = await request_provider(
+                client,
                 "https://accounts.spotify.com/api/token",
+                method="POST",
                 data={"grant_type": "client_credentials"},
                 auth=(config.SPOTIFY_CLIENT_ID, config.SPOTIFY_CLIENT_SECRET),
             )
@@ -126,9 +129,9 @@ async def _get_spotify_access_token() -> str:
         token = str(payload.get("access_token", ""))
         if not token:
             raise RuntimeError("Spotify auth response has no access token")
-        expires_in = max(int(payload.get("expires_in", 3600)), 60)
+        expires_in = max(int(payload.get("expires_in", 3600)), 1)
         _access_token = token
-        _access_token_expires_at = time.monotonic() + expires_in - 30
+        _access_token_expires_at = time.monotonic() + max(expires_in - 30, expires_in / 2)
         return token
 
 
@@ -179,7 +182,7 @@ def _spotify_published_at(entity_type: str | None, metadata: dict) -> datetime |
 def _format_duration_ms(value: object) -> str | None:
     try:
         total_seconds = max(int(value) // 1000, 0)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)

@@ -53,7 +53,12 @@ class CallbackQueryAdapter:
         self.message = MessageAdapter(query.message) if isinstance(query.message, Message) else query.message
 
     async def answer(self, *args, **kwargs):
-        return await self.raw.answer(*args, **kwargs)
+        try:
+            return await self.raw.answer(*args, **kwargs)
+        except TelegramBadRequest as exc:
+            if "query is too old" not in exc.message.lower() and "query id is invalid" not in exc.message.lower():
+                raise
+            return None
 
     async def edit_message_text(self, text: str, **kwargs):
         if isinstance(self.raw.message, Message):

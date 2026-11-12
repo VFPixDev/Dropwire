@@ -100,10 +100,14 @@ async def get_translation_language(database: Database | None, update: Update) ->
     chat = update.effective_chat
     if database is not None and chat is not None and chat.type in {"group", "supergroup"}:
         group_lang = await database.get_translation_language("group", chat.id)
+        if group_lang == "off":
+            return None
         if group_lang in SUPPORTED_LANGUAGES:
             return group_lang
     if database is not None and user is not None:
         user_lang = await database.get_translation_language("dm", user.id)
+        if user_lang == "off":
+            return None
         if user_lang in SUPPORTED_LANGUAGES:
             return user_lang
     if database is not None:

@@ -3,6 +3,7 @@ import os
 import shutil
 import json
 from dataclasses import dataclass
+
 # ffmpeg is invoked with argument lists and without a shell.
 import subprocess  # nosec B404
 import tempfile
@@ -45,7 +46,7 @@ def probe_video(input_path: str) -> VideoMetadata | None:
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=15, check=True)  # nosec B603
         payload = json.loads(result.stdout)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+    except subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError:
         logger.warning("Не удалось прочитать метаданные видео: %s", input_path)
         return None
 
@@ -62,19 +63,19 @@ def probe_video(input_path: str) -> VideoMetadata | None:
     if isinstance(tags, dict):
         try:
             rotation = int(tags.get("rotate", 0)) % 360
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             rotation = 0
     for side_data in video.get("side_data_list") or []:
         if isinstance(side_data, dict) and side_data.get("rotation") is not None:
             try:
                 rotation = int(side_data["rotation"]) % 360
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 pass
 
     raw_duration = video.get("duration") or (payload.get("format") or {}).get("duration")
     try:
         duration = max(0, round(float(raw_duration))) if raw_duration is not None else None
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         duration = None
 
     return VideoMetadata(
@@ -92,7 +93,7 @@ def probe_video(input_path: str) -> VideoMetadata | None:
 def _positive_int(value) -> int | None:
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return parsed if parsed > 0 else None
 
@@ -138,6 +139,8 @@ def compress_image(input_path: str, max_size_mb: float | None = None) -> str:
     if current_size <= max_size_mb:
         return input_path
 
+    output_path = None
+    keep_output = False
     try:
         with Image.open(input_path) as img:
             # Конвертируем в RGB если нужно
@@ -165,6 +168,7 @@ def compress_image(input_path: str, max_size_mb: float | None = None) -> str:
         new_size = get_file_size_mb(output_path)
         logger.info("Изображение сжато: %.2fMB -> %.2fMB", current_size, new_size)
         if new_size <= max_size_mb:
+            keep_output = True
             return output_path
 
         logger.warning("Сжатое изображение всё ещё больше лимита: %.2fMB > %.2fMB", new_size, max_size_mb)
@@ -172,6 +176,12 @@ def compress_image(input_path: str, max_size_mb: float | None = None) -> str:
     except Exception as exc:
         logger.error("Ошибка сжатия изображения: %s", exc)
         return input_path
+    finally:
+        if output_path and not keep_output:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                logger.debug("Could not remove failed image output", exc_info=True)
 
 
 def compress_video(input_path: str, max_size_mb: float | None = None, *, is_animation: bool = False) -> str:
@@ -197,6 +207,8 @@ def compress_video(input_path: str, max_size_mb: float | None = None, *, is_anim
         logger.warning("ffmpeg недоступен, сжатие видео невозможно")
         return input_path
 
+    output_path = None
+    keep_output = False
     try:
         fd, output_path = tempfile.mkstemp(suffix=".mp4", dir=tempfile.gettempdir(), prefix="compressed_")
         os.close(fd)
@@ -236,6 +248,7 @@ def compress_video(input_path: str, max_size_mb: float | None = None, *, is_anim
             new_size = get_file_size_mb(output_path)
             logger.info("Видео подготовлено: %.2fMB -> %.2fMB", current_size, new_size)
             if new_size <= max_size_mb:
+                keep_output = True
                 return output_path
             logger.warning("Сжатое видео всё ещё больше лимита: %.2fMB > %.2fMB", new_size, max_size_mb)
         else:
@@ -247,3 +260,9 @@ def compress_video(input_path: str, max_size_mb: float | None = None, *, is_anim
     except Exception as exc:
         logger.error("Ошибка сжатия видео: %s", exc)
         return input_path
+    finally:
+        if output_path and not keep_output:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                logger.debug("Could not remove failed video output", exc_info=True)

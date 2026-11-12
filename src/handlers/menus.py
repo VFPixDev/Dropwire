@@ -60,7 +60,7 @@ CB_TRANSLATE_SET = "tr:set:"
 
 
 def get_main_menu_text() -> str:
-    return f"""<b>👋 Привет! Я {config.APP_NAME}.</b>
+    return f"""<b>👋 Привет! Я {escape(config.APP_NAME)}.</b>
 
 Отправьте ссылку из Twitter/X, YouTube, Spotify или SoundCloud, и я оформлю ее в удобную карточку.
 
@@ -85,7 +85,7 @@ def get_main_menu_keyboard(is_private: bool = True, is_admin: bool = False) -> I
 
 
 def get_help_text() -> str:
-    return f"""<b>📖 Справка по {config.APP_NAME}</b>
+    return f"""<b>📖 Справка по {escape(config.APP_NAME)}</b>
 
 <b>Поддерживаемые ссылки:</b>
 • https://x.com/username/status/123
@@ -118,7 +118,7 @@ def get_help_keyboard() -> InlineKeyboardMarkup:
 def get_settings_hub_text(is_private: bool, is_admin: bool) -> str:
     if is_private:
         admin_line = "\n<b>Глобальные:</b> доступны администратору бота" if is_admin else ""
-        return f"""<b>⚙️ Настройки {config.APP_NAME}</b>
+        return f"""<b>⚙️ Настройки {escape(config.APP_NAME)}</b>
 
 <b>Групповые:</b> выбираются здесь, в ЛС
 <b>Перевод:</b> для вас или выбранной группы{admin_line}
@@ -158,7 +158,7 @@ def get_scope_settings_text(
     mode = values.get("sender_quote_mode", config.SENDER_QUOTE_MODE)
     lines.append(f"• Отправитель в цитате: {SENDER_QUOTE_MODES.get(mode, mode)}")
 
-    if translation:
+    if translation and translation != "off":
         lines.append(f"• Перевод: {SUPPORTED_LANGUAGES.get(translation, translation)}")
     else:
         lines.append("• Перевод: ❌")
@@ -273,8 +273,10 @@ def get_translate_scope_keyboard(is_group: bool) -> InlineKeyboardMarkup:
 
 
 def get_translate_language_text(scope_title: str, current_lang: str | None = None) -> str:
-    current = SUPPORTED_LANGUAGES.get(current_lang, current_lang) if current_lang else "выключен"
-    return f"<b>🌐 Перевод: {scope_title}</b>\n\nТекущий режим: {current}\n\nВыберите язык:"
+    current = (
+        SUPPORTED_LANGUAGES.get(current_lang, current_lang) if current_lang and current_lang != "off" else "выключен"
+    )
+    return f"<b>🌐 Перевод: {escape(scope_title)}</b>\n\nТекущий режим: {escape(current)}\n\nВыберите язык:"
 
 
 def get_translate_language_keyboard(

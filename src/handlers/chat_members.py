@@ -28,8 +28,9 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
 
     if new_status in ACTIVE_BOT_STATUSES:
         await database.upsert_group(chat.id, chat.title or str(chat.id), chat.type)
-        await database.link_user_group(event.from_user.id, chat.id, "adder")
-        logger.info("Группа %s привязана к пользователю %s", chat.id, event.from_user.id)
+        if old_status not in ACTIVE_BOT_STATUSES:
+            await database.link_user_group(event.from_user.id, chat.id, "adder")
+            logger.info("Группа %s привязана к пользователю %s", chat.id, event.from_user.id)
         return
 
     if old_status in ACTIVE_BOT_STATUSES and new_status in INACTIVE_BOT_STATUSES:

@@ -1,4 +1,4 @@
-FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc
+FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc AS system
 
 ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 
@@ -10,6 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#" /etc/apk/repositories && \
     apk upgrade --no-cache && \
     apk add --no-cache ffmpeg
+
+FROM system AS runtime
 
 RUN adduser --disabled-password --uid 1000 botuser && \
     mkdir -p /tmp /app/data /app/downloads && \

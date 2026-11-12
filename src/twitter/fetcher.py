@@ -7,6 +7,7 @@ import httpx
 from tenacity import before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.config import config
+from src.providers.http import ResponseTooLargeError as ResponseTooLargeError, read_response_limited
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,6 @@ FXTWITTER_MEDIA_REDIRECT_PATH = "/2/go"
 
 class MediaTooLargeError(ValueError):
     """Raised when a media response exceeds configured download limits."""
-
-
-class ResponseTooLargeError(ValueError):
-    """Raised when an FxTwitter API or HTML response exceeds its limit."""
 
 
 def _is_retry_status(status_code: int) -> bool:
@@ -69,27 +66,7 @@ async def _get_with_retry(
         if response.status_code != 200:
             return httpx.Response(response.status_code, headers=response.headers, request=response.request)
 
-        content_length = response.headers.get("Content-Length")
-        if content_length:
-            try:
-                declared_size = int(content_length)
-            except ValueError as exc:
-                raise ResponseTooLargeError("FxTwitter returned an invalid Content-Length") from exc
-            if declared_size > max_bytes:
-                raise ResponseTooLargeError("FxTwitter response exceeds the configured limit")
-
-        data = bytearray()
-        async for chunk in response.aiter_bytes():
-            data.extend(chunk)
-            if len(data) > max_bytes:
-                raise ResponseTooLargeError("FxTwitter response exceeds the configured limit")
-
-        return httpx.Response(
-            response.status_code,
-            headers=response.headers,
-            content=bytes(data),
-            request=response.request,
-        )
+        return await read_response_limited(response, max_bytes)
 
 
 async def fetch_tweet_data(tweet_id: str, username: str, lang_code: Optional[str] = None) -> Optional[dict]:

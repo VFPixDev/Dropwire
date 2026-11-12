@@ -393,7 +393,7 @@ class Database:
         if not row:
             return None
         language = str(row["language"])
-        return None if language == "off" else language
+        return language
 
     async def create_download_request(
         self,
@@ -427,6 +427,7 @@ class Database:
     ) -> tuple[int | None, str | None]:
         """Atomically reserve a pending download for one bot process."""
         async with self._download_request_lock:
+            await self.expire_pending_download_requests()
             if await self.find_active_download_request(telegram_id, video_id) is not None:
                 return None, "duplicate"
             if await self.count_active_download_requests(telegram_id) >= max(1, int(max_active)):
@@ -439,6 +440,32 @@ class Database:
                 status="pending",
             )
             return request_id, None
+
+    async def expire_pending_download_requests(self, max_age_minutes: int = 60) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)).isoformat()
+        cursor = await self.conn.execute(
+            "UPDATE download_requests SET status = 'failed', updated_at = ? WHERE status = 'pending' AND updated_at < ?",
+            (_utc_now(), cutoff),
+        )
+        await self.conn.commit()
+        return max(cursor.rowcount, 0)
+
+    async def cancel_download_request(self, request_id: int, telegram_id: int) -> bool:
+        cursor = await self.conn.execute(
+            "UPDATE download_requests SET status = 'cancelled', updated_at = ? "
+            "WHERE id = ? AND telegram_id = ? AND status IN ('pending', 'queued')",
+            (_utc_now(), request_id, telegram_id),
+        )
+        await self.conn.commit()
+        return cursor.rowcount == 1
+
+    async def start_download_request(self, request_id: int) -> bool:
+        cursor = await self.conn.execute(
+            "UPDATE download_requests SET status = 'downloading', updated_at = ? WHERE id = ? AND status = 'queued'",
+            (_utc_now(), request_id),
+        )
+        await self.conn.commit()
+        return cursor.rowcount == 1
 
     async def fail_interrupted_downloads(self) -> int:
         """Release requests whose in-memory jobs disappeared during a restart."""

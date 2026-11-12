@@ -8,14 +8,11 @@ from html import escape
 import logging
 import re
 import time
-from urllib.parse import parse_qs, urlparse
 
 from aiogram.types import (
     InlineQueryResult,
     InlineQueryResultArticle,
-    InlineQueryResultMpeg4Gif,
     InlineQueryResultPhoto,
-    InlineQueryResultVideo,
     InputRichMessageContent,
     InputTextMessageContent,
     User,
@@ -39,12 +36,10 @@ from src.rendering.youtube_rich import build_youtube_rich_message
 from src.services.database import Database
 from src.services.providers import is_provider_enabled
 from src.services.settings import EffectiveSettings, get_effective_settings, get_translation_language, is_user_allowed
-from src.twitter.fetcher import get_trusted_twitter_mp4_url
 from src.twitter.loader import fetch_complete_tweet
 from src.twitter.normalize import extract_tweet_id, extract_username, normalize_url
 from src.twitter.models import Tweet
 from src.utils.sender_quote import format_sender_quote
-from src.utils.text_format import format_tweet_card, format_tweet_footer, has_tweet_translation
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +87,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         async with asyncio.timeout(INLINE_FETCH_TIMEOUT_SECONDS):
-            async with _inline_fetch_slots:
-                built = await _build_inline_result(update, database, link, settings, user, comment)
+            built = await _build_inline_result(update, database, link, settings, user, comment)
     except TimeoutError:
         logger.info("Inline preparation continues in background user_id=%s source=%s", user.id, link.source)
         pending = _build_status_result(
@@ -150,12 +144,10 @@ async def _build_inline_result(
         hashtags = ""
         if settings.enable_hashtags:
             hashtags = render_hashtags(build_hashtags("twitter", "post", tweet.username))
-        text = format_tweet_card(tweet, include_translation=has_tweet_translation(tweet))
-        footer = format_tweet_footer(tweet, hashtags)
-        if footer:
-            text = f"{text}\n\n{footer}"
-        sender_quote = format_sender_quote(user, comment, settings.sender_quote_mode) if settings.include_sender_quote else ""
-        text = f"{sender_quote}\n\n{text}" if sender_quote else text
+        sender_quote = (
+            format_sender_quote(user, comment, settings.sender_quote_mode) if settings.include_sender_quote else ""
+        )
+        text = tweet.text
         preview_url = _tweet_preview_url(tweet)
         title = f"{tweet.display_name} (@{tweet.username})"
         description = _plain_description(tweet.text)
@@ -177,10 +169,7 @@ async def _build_inline_result(
         if rich_result is not None:
             return rich_result
 
-        # Keep the inline picker compact even when Telegram media preparation
-        # is unavailable. The next query will use the background-populated cache.
-        fallback = _build_twitter_result(link, tweet, title, description, text, preview_url, keyboard, settings)
-        return BuiltInlineResult(primary=fallback.fallback, fallback=fallback.fallback)
+        return _build_status_result(link, title, "Публикация доступна по кнопке оригинала.")
 
     card = await _fetch_media_card(link)
     if card is None:
@@ -193,7 +182,9 @@ async def _build_inline_result(
     description = _card_description(card)
     keyboard = _url_only_keyboard(card)
     if card.source == "youtube":
-        sender_quote = format_sender_quote(user, comment, settings.sender_quote_mode) if settings.include_sender_quote else ""
+        sender_quote = (
+            format_sender_quote(user, comment, settings.sender_quote_mode) if settings.include_sender_quote else ""
+        )
         hashtags = render_hashtags(card.hashtags)
         rich_result = await _build_rich_youtube_result(
             update,
@@ -249,6 +240,8 @@ async def _fetch_tweet(url: str, language: str | None) -> Tweet | None:
 
     task = _tweet_fetch_tasks.get(key)
     if task is None:
+        if len(_tweet_fetch_tasks) >= INLINE_TWEET_CACHE_SIZE:
+            return None
         task = asyncio.create_task(
             _load_and_cache_tweet(key, normalized_url, tweet_id, username, language),
             name=f"inline-tweet-{tweet_id}",
@@ -266,7 +259,8 @@ async def _load_and_cache_tweet(
 ) -> Tweet | None:
     try:
         try:
-            tweet = await fetch_complete_tweet(normalized_url, tweet_id, username, language)
+            async with _inline_fetch_slots, asyncio.timeout(60):
+                tweet = await fetch_complete_tweet(normalized_url, tweet_id, username, language)
         except Exception:
             logger.warning("Background inline tweet fetch failed tweet_id=%s", tweet_id, exc_info=True)
             tweet = None
@@ -281,6 +275,13 @@ async def _load_and_cache_tweet(
         current = asyncio.current_task()
         if _tweet_fetch_tasks.get(key) is current:
             _tweet_fetch_tasks.pop(key, None)
+
+
+async def shutdown_inline_tasks() -> None:
+    tasks = tuple(_tweet_fetch_tasks.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _build_status_result(link: LinkMatch, title: str, description: str) -> BuiltInlineResult:
@@ -343,79 +344,6 @@ def _build_result(
     return BuiltInlineResult(primary=photo, fallback=article)
 
 
-def _build_twitter_result(
-    link: LinkMatch,
-    tweet: Tweet,
-    title: str,
-    description: str,
-    text: str,
-    preview_url: str | None,
-    keyboard: InlineKeyboardMarkup | None,
-    settings: EffectiveSettings,
-) -> BuiltInlineResult:
-    fallback = _build_result(link, title, description, text, preview_url, keyboard, settings)
-    message_text = _fit_message_text(text, title, link.url)
-    if len(message_text) > 1024:
-        return fallback
-
-    for media_item in tweet.media:
-        if media_item.type != "animation":
-            continue
-        animation_url = get_trusted_twitter_mp4_url(media_item.url)
-        thumbnail_url = _trusted_twitter_jpeg_url(media_item.thumbnail_url) or _trusted_twitter_jpeg_url(preview_url)
-        if not animation_url or not thumbnail_url:
-            continue
-        result_key = sha256(f"gif:{link.url}:{message_text}".encode("utf-8")).hexdigest()[:32]
-        animation = InlineQueryResultMpeg4Gif(
-            id=f"g{result_key}",
-            mpeg4_url=animation_url,
-            thumbnail_url=thumbnail_url,
-            mpeg4_width=media_item.width,
-            mpeg4_height=media_item.height,
-            mpeg4_duration=media_item.duration,
-            title=_single_line(title, 120),
-            caption=message_text,
-            parse_mode=ParseMode.HTML,
-            show_caption_above_media=settings.caption_above_media,
-            reply_markup=keyboard,
-        )
-        return BuiltInlineResult(primary=animation, fallback=fallback.fallback)
-
-    video_url = None
-    thumbnail_url = None
-    for media_item in tweet.media:
-        if media_item.type != "video":
-            continue
-        candidate_url = get_trusted_twitter_mp4_url(media_item.url)
-        candidate_thumbnail = _trusted_twitter_jpeg_url(media_item.thumbnail_url) or _trusted_twitter_jpeg_url(
-            preview_url
-        )
-        if candidate_url and candidate_thumbnail:
-            video_url = candidate_url
-            thumbnail_url = candidate_thumbnail
-            break
-
-    if video_url is None or thumbnail_url is None:
-        return fallback
-
-    safe_title = _single_line(title, 120) or _source_title(link.source)
-    safe_description = _single_line(description, 180)
-    result_key = sha256(f"{link.source}:{link.url}:{message_text}".encode("utf-8")).hexdigest()[:32]
-    video = InlineQueryResultVideo(
-        id=f"v{result_key}",
-        video_url=video_url,
-        mime_type="video/mp4",
-        thumbnail_url=thumbnail_url,
-        title=safe_title,
-        description=safe_description,
-        caption=message_text,
-        parse_mode=ParseMode.HTML,
-        show_caption_above_media=settings.caption_above_media,
-        reply_markup=keyboard,
-    )
-    return BuiltInlineResult(primary=video, fallback=fallback.fallback)
-
-
 async def _build_rich_twitter_result(
     update: Update,
     database: Database | None,
@@ -443,16 +371,14 @@ async def _build_rich_twitter_result(
 
     safe_title = _single_line(title, 120) or _source_title(link.source)
     safe_description = _single_line(description, 180)
-    fallback = _build_twitter_result(link, tweet, title, description, text, preview_url, keyboard, settings).fallback
-    result_key = sha256(f"rich-v2:{link.url}:{text}".encode("utf-8")).hexdigest()[:32]
+    fallback = _build_status_result(link, title, "Публикация доступна по кнопке оригинала.").fallback
+    result_key = sha256(f"rich-v3:{link.url}:{text}".encode("utf-8")).hexdigest()[:32]
     article = InlineQueryResultArticle(
         id=f"r{result_key}",
         title=safe_title,
         description=safe_description,
         thumbnail_url=preview_url,
-        input_message_content=InputRichMessageContent(
-            rich_message=rich.message
-        ),
+        input_message_content=InputRichMessageContent(rich_message=rich.message),
         reply_markup=keyboard,
     )
     return BuiltInlineResult(
@@ -536,27 +462,6 @@ def _tweet_preview_url(tweet) -> str | None:
         if media.thumbnail_url:
             return media.thumbnail_url
     return None
-
-
-def _trusted_twitter_jpeg_url(url: str | None) -> str | None:
-    if not url:
-        return None
-    parsed = urlparse(url)
-    hostname = (parsed.hostname or "").lower().rstrip(".")
-    if (
-        parsed.scheme != "https"
-        or parsed.username
-        or parsed.password
-        or parsed.fragment
-        or hostname not in {"pbs.twimg.com", "pbs.fxtwitter.com"}
-    ):
-        return None
-
-    extension = parsed.path.lower().rsplit(".", maxsplit=1)[-1] if "." in parsed.path else ""
-    query_format = parse_qs(parsed.query).get("format", [""])[0].lower()
-    if extension not in {"jpg", "jpeg"} and query_format not in {"jpg", "jpeg"}:
-        return None
-    return url
 
 
 def _card_description(card: MediaCard) -> str:

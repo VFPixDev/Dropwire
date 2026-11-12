@@ -35,9 +35,7 @@ async def main() -> int:
         if tweet is None:
             print("rich: failed (tweet fetch failed)")
             return 1
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Open original", url=url)]]
-        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Open original", url=url)]])
         built = await build_twitter_rich_message(bot, None, tweet)
         if built is None:
             print("rich: failed (media preparation failed)")
@@ -56,7 +54,7 @@ async def main() -> int:
                 try:
                     await database.init_schema()
                     await remember_sent_rich_media(database, tweet, sent.rich_message)
-                    cached = await cache_tweet_media(database, tweet.media)
+                    cached = await cache_tweet_media(bot, database, tweet.media)
                 finally:
                     await database.close()
         finally:

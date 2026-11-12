@@ -1,7 +1,10 @@
 import asyncio
+import logging
 import time
 
 from src.telegram_runtime import BadRequest, ContextTypes, NetworkError, RetryAfter, TelegramError
+
+logger = logging.getLogger(__name__)
 
 
 class MessageProgress:
@@ -23,8 +26,11 @@ class MessageProgress:
         self._last_text = ""
         self._suppress_until_ts = 0.0
         self._lock = asyncio.Lock()
+        self._disabled = False
 
     async def set_text(self, text: str, force: bool = False) -> None:
+        if self._disabled:
+            return
         now = time.monotonic()
         if not force and now < self._suppress_until_ts:
             return
@@ -42,11 +48,13 @@ class MessageProgress:
                     text=text,
                     chat_id=self._chat_id,
                     message_id=self._message_id,
+                    parse_mode=None,
                 )
             except BadRequest as exc:
                 if "message is not modified" in str(exc).lower():
                     return
-                raise
+                self._disabled = True
+                logger.info("Progress message is unavailable: %s", exc.message)
             except RetryAfter as exc:
                 self._suppress_until_ts = max(self._suppress_until_ts, time.monotonic() + float(exc.retry_after) + 0.5)
                 self._last_update_ts = now
@@ -54,8 +62,9 @@ class MessageProgress:
             except NetworkError:
                 self._suppress_until_ts = max(self._suppress_until_ts, time.monotonic() + 3.0)
                 self._last_update_ts = now
-            except TelegramError:
-                raise
+            except TelegramError as exc:
+                self._disabled = True
+                logger.info("Progress updates disabled: %s", type(exc).__name__)
             else:
                 self._last_update_ts = now
                 self._last_text = text

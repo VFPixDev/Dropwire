@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import httpx
 
 from src.config import config
+from src.providers.http import request_provider, ResponseTooLargeError
 
 
 class OEmbedError(RuntimeError):
@@ -22,7 +23,10 @@ class OEmbedData:
 async def fetch_oembed(endpoint: str, shared_url: str, expected_provider: str) -> OEmbedData:
     timeout = httpx.Timeout(15.0, connect=8.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        response = await client.get(endpoint, params={"format": "json", "url": shared_url})
+        try:
+            response = await request_provider(client, endpoint, params={"format": "json", "url": shared_url})
+        except ResponseTooLargeError as exc:
+            raise OEmbedError(f"Ответ {expected_provider} превышает допустимый размер") from exc
 
     if response.status_code == 404:
         raise ValueError(f"Ссылка {expected_provider} не найдена или недоступна")
@@ -37,6 +41,8 @@ async def fetch_oembed(endpoint: str, shared_url: str, expected_provider: str) -
         payload = json.loads(response.content)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise OEmbedError(f"{expected_provider} вернул некорректный ответ") from exc
+    if not isinstance(payload, dict):
+        raise OEmbedError(f"{expected_provider} вернул некорректный ответ")
 
     if str(payload.get("provider_name", "")).lower() != expected_provider.lower():
         raise OEmbedError(f"Неожиданный источник метаданных {expected_provider}")
