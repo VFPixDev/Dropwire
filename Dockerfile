@@ -1,4 +1,4 @@
-FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc AS system
+FROM python:3.15-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd AS system
 
 ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 
